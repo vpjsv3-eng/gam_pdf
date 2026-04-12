@@ -21,21 +21,32 @@ type UploadedFile = {
   size: number;
 };
 
+function fieldContext(data: Record<string, unknown>, fieldKey: string): string | undefined {
+  const raw = data[`${fieldKey}_context`];
+  if (typeof raw !== "string") return undefined;
+  const t = raw.trim();
+  return t.length > 0 ? t : undefined;
+}
+
 function SourceLink({
   fileCount,
   onGoTo,
   text,
+  sectionKey,
+  context,
 }: {
   fileCount: number;
-  onGoTo: (fileIndex: number, highlightText: string) => void;
+  onGoTo: (fileIndex: number, highlightText: string, sectionKey: string, context?: string) => void;
   text: string;
+  sectionKey: string;
+  context?: string;
 }) {
   const t = text.trim();
   if (fileCount <= 0 || !t) return null;
   return (
     <button
       type="button"
-      onClick={() => onGoTo(0, t)}
+      onClick={() => onGoTo(0, t, sectionKey, context)}
       className="shrink-0 text-xs text-sky-600 underline-offset-2 hover:underline"
     >
       🔍 원본
@@ -48,11 +59,15 @@ function DetailRow({
   value,
   fileCount,
   onGoTo,
+  sectionKey,
+  context,
 }: {
   label: string;
   value: string;
   fileCount: number;
-  onGoTo: (fileIndex: number, highlightText: string) => void;
+  onGoTo: (fileIndex: number, highlightText: string, sectionKey: string, context?: string) => void;
+  sectionKey: string;
+  context?: string;
 }) {
   const v = value.trim();
   return (
@@ -60,7 +75,62 @@ function DetailRow({
       <div className="shrink-0 text-zinc-500">{label}</div>
       <div className="flex min-w-0 flex-wrap items-start gap-x-2 gap-y-1">
         <span className="min-w-0 break-words text-zinc-900">{v || "—"}</span>
-        <SourceLink fileCount={fileCount} onGoTo={onGoTo} text={v} />
+        <SourceLink
+          fileCount={fileCount}
+          onGoTo={onGoTo}
+          text={v}
+          sectionKey={sectionKey}
+          context={context}
+        />
+      </div>
+    </div>
+  );
+}
+
+/** 건축물대장 탭: 텍스트 검색 대신 대장 구간 첫 페이지로만 이동 */
+function RegistrySectionSourceLink({
+  fileCount,
+  onScrollToRegistryPdfSection,
+  hasValue,
+}: {
+  fileCount: number;
+  onScrollToRegistryPdfSection: () => void;
+  hasValue: boolean;
+}) {
+  if (fileCount <= 0 || !hasValue) return null;
+  return (
+    <button
+      type="button"
+      onClick={onScrollToRegistryPdfSection}
+      className="shrink-0 text-xs text-sky-600 underline-offset-2 hover:underline"
+    >
+      🔍 원본
+    </button>
+  );
+}
+
+function RegistryDetailRow({
+  label,
+  value,
+  fileCount,
+  onScrollToRegistryPdfSection,
+}: {
+  label: string;
+  value: string;
+  fileCount: number;
+  onScrollToRegistryPdfSection: () => void;
+}) {
+  const v = value.trim();
+  return (
+    <div className="grid grid-cols-[minmax(8rem,11rem)_1fr] gap-3 border-b border-zinc-100 py-2.5 text-sm last:border-0">
+      <div className="shrink-0 text-zinc-500">{label}</div>
+      <div className="flex min-w-0 flex-wrap items-start gap-x-2 gap-y-1">
+        <span className="min-w-0 break-words text-zinc-900">{v || "—"}</span>
+        <RegistrySectionSourceLink
+          fileCount={fileCount}
+          onScrollToRegistryPdfSection={onScrollToRegistryPdfSection}
+          hasValue={Boolean(v)}
+        />
       </div>
     </div>
   );
@@ -68,17 +138,26 @@ function DetailRow({
 
 function RegistryParcelPanel({
   parcel,
+  parcelIndex,
   fileCount,
   onGoToSource,
 }: {
   parcel: RegistryParcel;
+  /** parcels 배열 기준 0-based — 탭 sectionKey와 동일한 키 계산용 */
+  parcelIndex: number;
   fileCount: number;
-  onGoToSource: (fileIndex: number, highlightText: string) => void;
+  onGoToSource: (
+    fileIndex: number,
+    highlightText: string,
+    sectionKey: string,
+    context?: string,
+  ) => void;
 }) {
-  const bi = parcel.basic_info ?? {};
-  const o = parcel.ownership ?? {};
+  const bi = (parcel.basic_info ?? {}) as Record<string, unknown>;
+  const o = (parcel.ownership ?? {}) as Record<string, unknown>;
   const r = parcel.rights ?? {};
   const list = r.근저당권 ?? [];
+  const sectionKey = registryParcelTabTitle(parcel, parcelIndex);
 
   return (
     <div className="space-y-8">
@@ -90,15 +169,19 @@ function RegistryParcelPanel({
           <p className="border-b border-zinc-100 py-2 text-xs font-medium uppercase text-zinc-400">
             기본 정보
           </p>
-          {Object.entries(bi).map(([k, v]) => (
-            <DetailRow
-              key={k}
-              label={k}
-              value={v === null || v === undefined ? "" : String(v)}
-              fileCount={fileCount}
-              onGoTo={onGoToSource}
-            />
-          ))}
+          {Object.entries(bi)
+            .filter(([k]) => !k.endsWith("_context"))
+            .map(([k, v]) => (
+              <DetailRow
+                key={k}
+                label={k}
+                value={v === null || v === undefined ? "" : String(v)}
+                fileCount={fileCount}
+                onGoTo={onGoToSource}
+                sectionKey={sectionKey}
+                context={fieldContext(bi, k)}
+              />
+            ))}
         </div>
       </section>
 
@@ -108,7 +191,7 @@ function RegistryParcelPanel({
             소유권
           </p>
           {Object.entries(o)
-            .filter(([k]) => k !== "이전이력")
+            .filter(([k]) => k !== "이전이력" && !k.endsWith("_context"))
             .map(([k, v]) => (
               <DetailRow
                 key={k}
@@ -116,6 +199,8 @@ function RegistryParcelPanel({
                 value={v === null || v === undefined ? "" : String(v)}
                 fileCount={fileCount}
                 onGoTo={onGoToSource}
+                sectionKey={sectionKey}
+                context={fieldContext(o, k)}
               />
             ))}
           {Array.isArray(o.이전이력) && o.이전이력.length > 0 && (
@@ -141,6 +226,8 @@ function RegistryParcelPanel({
             value={r.지상권 === null || r.지상권 === undefined ? "" : String(r.지상권)}
             fileCount={fileCount}
             onGoTo={onGoToSource}
+            sectionKey={sectionKey}
+            context={fieldContext(r as unknown as Record<string, unknown>, "지상권")}
           />
           <DetailRow
             label="압류·가압류"
@@ -149,6 +236,8 @@ function RegistryParcelPanel({
             }
             fileCount={fileCount}
             onGoTo={onGoToSource}
+            sectionKey={sectionKey}
+            context={fieldContext(r as unknown as Record<string, unknown>, "압류가압류")}
           />
           <div className="py-2 text-sm">
             <div className="mb-2 font-medium text-zinc-700">근저당권</div>
@@ -169,18 +258,23 @@ function RegistryParcelPanel({
                   <tbody>
                     {list.map((m, i) => (
                       <tr key={i} className="border-b border-zinc-100">
-                        {(["상태", "채권최고액", "설정일", "채권자", "채무자"] as const).map((col) => (
-                          <td key={col} className="py-2 pr-2 align-top">
-                            <div className="flex flex-wrap gap-1">
-                              <span>{String(m[col] ?? "") || "—"}</span>
-                              <SourceLink
-                                fileCount={fileCount}
-                                onGoTo={onGoToSource}
-                                text={String(m[col] ?? "")}
-                              />
-                            </div>
-                          </td>
-                        ))}
+                        {(["상태", "채권최고액", "설정일", "채권자", "채무자"] as const).map((col) => {
+                          const row = m as unknown as Record<string, unknown>;
+                          return (
+                            <td key={col} className="py-2 pr-2 align-top">
+                              <div className="flex flex-wrap gap-1">
+                                <span>{String(m[col] ?? "") || "—"}</span>
+                                <SourceLink
+                                  fileCount={fileCount}
+                                  onGoTo={onGoToSource}
+                                  text={String(m[col] ?? "")}
+                                  sectionKey={sectionKey}
+                                  context={fieldContext(row, col)}
+                                />
+                              </div>
+                            </td>
+                          );
+                        })}
                       </tr>
                     ))}
                   </tbody>
@@ -217,11 +311,11 @@ function RegistryParcelPanel({
 function BuildingRegistryPanel({
   br,
   fileCount,
-  onGoToSource,
+  onScrollToRegistryPdfSection,
 }: {
   br: NonNullable<AnalysisResult["building_registry"]>;
   fileCount: number;
-  onGoToSource: (fileIndex: number, highlightText: string) => void;
+  onScrollToRegistryPdfSection: () => void;
 }) {
   const skip = new Set(["동별내역", "변동사항"]);
   const rows = Object.entries(br).filter(([k]) => !skip.has(k));
@@ -233,12 +327,12 @@ function BuildingRegistryPanel({
           총괄표제부 요약
         </p>
         {rows.map(([k, v]) => (
-          <DetailRow
+          <RegistryDetailRow
             key={k}
             label={k}
             value={v === null || v === undefined ? "" : String(v)}
             fileCount={fileCount}
-            onGoTo={onGoToSource}
+            onScrollToRegistryPdfSection={onScrollToRegistryPdfSection}
           />
         ))}
       </div>
@@ -263,10 +357,10 @@ function BuildingRegistryPanel({
                       <td key={j} className="py-2 pr-2 align-top">
                         <div className="flex flex-wrap gap-1">
                           <span>{String(cell ?? "")}</span>
-                          <SourceLink
+                          <RegistrySectionSourceLink
                             fileCount={fileCount}
-                            onGoTo={onGoToSource}
-                            text={String(cell ?? "")}
+                            onScrollToRegistryPdfSection={onScrollToRegistryPdfSection}
+                            hasValue={Boolean(String(cell ?? "").trim())}
                           />
                         </div>
                       </td>
@@ -353,8 +447,15 @@ export default function RealtyAnalyzer() {
     }, 4000);
   }, []);
 
-  const goToSourceText = useCallback((fileIndex: number, highlightText: string) => {
-    pdfRef.current?.findTextAndHighlight(fileIndex, highlightText);
+  const goToSourceText = useCallback(
+    (fileIndex: number, highlightText: string, sectionKey: string, context?: string) => {
+      pdfRef.current?.findTextAndHighlight(fileIndex, highlightText, sectionKey, context);
+    },
+    [],
+  );
+
+  const scrollToBuildingRegistryPdfSection = useCallback(() => {
+    pdfRef.current?.scrollToBuildingRegistrySection(0);
   }, []);
 
   const reset = useCallback(() => {
@@ -668,6 +769,7 @@ export default function RealtyAnalyzer() {
               {mainTab > 0 && mainTab < 1 + parcels.length && parcels[mainTab - 1] && (
                 <RegistryParcelPanel
                   parcel={parcels[mainTab - 1]}
+                  parcelIndex={mainTab - 1}
                   fileCount={fileCount}
                   onGoToSource={goToSourceText}
                 />
@@ -676,7 +778,7 @@ export default function RealtyAnalyzer() {
                 <BuildingRegistryPanel
                   br={result.building_registry}
                   fileCount={fileCount}
-                  onGoToSource={goToSourceText}
+                  onScrollToRegistryPdfSection={scrollToBuildingRegistryPdfSection}
                 />
               )}
 

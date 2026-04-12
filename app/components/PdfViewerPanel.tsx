@@ -14,6 +14,15 @@ import type { PDFDocumentProxy } from "pdfjs-dist";
 import { getPdfjs } from "@/lib/pdfjsClient";
 import { isPdfTextSpanStruckOrCancelled } from "@/lib/pdfTextLayerStrike";
 import {
+  computePdfSectionRanges,
+  getBuildingRegistryStartPage,
+  type PdfSectionRange,
+} from "@/lib/pdfSectionPages";
+import {
+  findNormalizedNeedleRanges,
+  findNormalizedValueRanges,
+} from "@/lib/pdfSearchNormalize";
+import {
   PDF_HIGHLIGHT_BG,
   collectPdfTextMatchRanges,
   spanIndicesForCharRange,
@@ -26,7 +35,14 @@ type UploadedFile = {
 };
 
 export type PdfViewerHandle = {
-  findTextAndHighlight: (fileIndex: number, query: string) => void;
+  findTextAndHighlight: (
+    fileIndex: number,
+    query: string,
+    sectionKey: string,
+    context?: string | null,
+  ) => void;
+  /** 건축물대장 구간 첫 페이지로만 이동(텍스트 검색·하이라이트 없음) */
+  scrollToBuildingRegistrySection: (fileIndex: number) => void;
 };
 
 type PageLayerData = {
@@ -59,10 +75,16 @@ const PdfViewerPanel = forwardRef<PdfViewerHandle, Props>(function PdfViewerPane
   const scrollRef = useRef<HTMLDivElement>(null);
   const pagesHostRef = useRef<HTMLDivElement>(null);
   const pageDataRef = useRef<Map<number, PageLayerData>>(new Map());
+  const sectionRangesRef = useRef<PdfSectionRange[]>([]);
   const highlightedElsRef = useRef<HTMLElement[]>([]);
   const textLayersRef = useRef<{ cancel: () => void }[]>([]);
   const renderGenRef = useRef(0);
-  const pendingSearchRef = useRef<string | null>(null);
+  const pendingSearchRef = useRef<{
+    query: string;
+    sectionKey: string;
+    context?: string | null;
+  } | null>(null);
+  const pendingRegistryScrollRef = useRef(false);
   const fullyRenderedRef = useRef(false);
   const ioRef = useRef<IntersectionObserver | null>(null);
   const pageVisibilityRatiosRef = useRef<Map<number, number>>(new Map());
@@ -93,45 +115,90 @@ const PdfViewerPanel = forwardRef<PdfViewerHandle, Props>(function PdfViewerPane
     textLayersRef.current = [];
   }, []);
 
-  const executeSearch = useCallback((query: string): boolean => {
-    const q = query.trim();
-    if (q.length < 1) return false;
+  const tryApplyHighlight = useCallback(
+    (strings: string[], divs: HTMLElement[], cand: { start: number; end: number }): boolean => {
+      const idxs = spanIndicesForCharRange(strings, cand.start, cand.end);
+      const toHighlight: HTMLElement[] = [];
+      for (const i of idxs) {
+        const el = divs[i];
+        if (!el || !(el instanceof HTMLElement)) return false;
+        if (isPdfTextSpanStruckOrCancelled(el)) return false;
+        toHighlight.push(el);
+      }
+      if (toHighlight.length === 0) return false;
+      for (const el of toHighlight) {
+        el.style.backgroundColor = PDF_HIGHLIGHT_BG;
+      }
+      highlightedElsRef.current = toHighlight;
+      const first = toHighlight[0];
+      requestAnimationFrame(() => {
+        first.scrollIntoView({ behavior: "instant", block: "center" });
+      });
+      return true;
+    },
+    [],
+  );
+
+  const executeSearch = useCallback(
+    (query: string, sectionKey: string, context?: string | null): boolean => {
+      const q = query.trim();
+      if (q.length < 1) return false;
+      clearHighlights();
+      const sec = sectionRangesRef.current.find((r) => r.sectionKey === sectionKey);
+      if (!sec) return false;
+      const ctx = (context ?? "").trim();
+
+      for (let p = sec.startPage; p <= sec.endPage; p++) {
+        const data = pageDataRef.current.get(p);
+        if (!data?.strings.length || !data.divs.length) continue;
+        const { strings, divs } = data;
+        const joined = strings.join("");
+
+        if (ctx.length > 0) {
+          const ctxRanges = findNormalizedNeedleRanges(joined, ctx);
+          for (const cr of ctxRanges) {
+            const winStart = Math.max(0, cr.start - 1200);
+            const winEnd = Math.min(joined.length, cr.end + 2400);
+            const valRanges = findNormalizedValueRanges(joined, q)
+              .filter((r) => r.start >= winStart && r.end <= winEnd)
+              .sort((a, b) => a.start - b.start);
+            for (const vr of valRanges) {
+              if (tryApplyHighlight(strings, divs, vr)) return true;
+            }
+          }
+        }
+
+        const normRanges = findNormalizedValueRanges(joined, q).sort((a, b) => a.start - b.start);
+        for (const vr of normRanges) {
+          if (tryApplyHighlight(strings, divs, vr)) return true;
+        }
+
+        for (const cand of collectPdfTextMatchRanges(strings, q)) {
+          if (tryApplyHighlight(strings, divs, cand)) return true;
+        }
+      }
+      return false;
+    },
+    [clearHighlights, tryApplyHighlight],
+  );
+
+  const scrollToBuildingRegistrySectionImpl = useCallback(() => {
     clearHighlights();
     const n = pdfDoc?.numPages ?? 0;
-    for (let p = 1; p <= n; p++) {
-      const data = pageDataRef.current.get(p);
-      if (!data?.strings.length || !data.divs.length) continue;
-      const candidates = collectPdfTextMatchRanges(data.strings, q);
-      for (const range of candidates) {
-        const idxs = spanIndicesForCharRange(data.strings, range.start, range.end);
-        const toHighlight: HTMLElement[] = [];
-        let skipCandidate = false;
-        for (const i of idxs) {
-          const el = data.divs[i];
-          if (!el || !(el instanceof HTMLElement)) continue;
-          if (isPdfTextSpanStruckOrCancelled(el)) {
-            skipCandidate = true;
-            break;
-          }
-          toHighlight.push(el);
-        }
-        if (skipCandidate || toHighlight.length === 0) continue;
-        for (const el of toHighlight) {
-          el.style.backgroundColor = PDF_HIGHLIGHT_BG;
-        }
-        highlightedElsRef.current = toHighlight;
-        const first = toHighlight[0];
-        requestAnimationFrame(() => {
-          first.scrollIntoView({ behavior: "instant", block: "center" });
-        });
-        return true;
-      }
+    const startPage = getBuildingRegistryStartPage(pageDataRef.current, n) ?? 1;
+    const host = pagesHostRef.current;
+    const wrap = host?.querySelector<HTMLElement>(`[data-page-num="${startPage}"]`);
+    if (wrap) {
+      requestAnimationFrame(() => {
+        wrap.scrollIntoView({ behavior: "instant", block: "start" });
+      });
     }
-    return false;
   }, [pdfDoc, clearHighlights]);
 
   const executeSearchRef = useRef(executeSearch);
   executeSearchRef.current = executeSearch;
+  const scrollToRegistryRef = useRef(scrollToBuildingRegistrySectionImpl);
+  scrollToRegistryRef.current = scrollToBuildingRegistrySectionImpl;
   const onTextNotFoundRef = useRef(onTextNotFound);
   onTextNotFoundRef.current = onTextNotFound;
 
@@ -142,8 +209,10 @@ const PdfViewerPanel = forwardRef<PdfViewerHandle, Props>(function PdfViewerPane
     clearHighlights();
     cancelTextLayers();
     pageDataRef.current = new Map();
+    sectionRangesRef.current = [];
     fullyRenderedRef.current = false;
     pendingSearchRef.current = null;
+    pendingRegistryScrollRef.current = false;
     if (pagesHostRef.current) pagesHostRef.current.innerHTML = "";
     ioRef.current?.disconnect();
     ioRef.current = null;
@@ -203,6 +272,7 @@ const PdfViewerPanel = forwardRef<PdfViewerHandle, Props>(function PdfViewerPane
     clearHighlights();
     cancelTextLayers();
     pageDataRef.current = new Map();
+    sectionRangesRef.current = [];
     host.innerHTML = "";
     ioRef.current?.disconnect();
     ioRef.current = null;
@@ -281,6 +351,8 @@ const PdfViewerPanel = forwardRef<PdfViewerHandle, Props>(function PdfViewerPane
 
         if (cancelled || gen !== renderGenRef.current) return;
 
+        sectionRangesRef.current = computePdfSectionRanges(pageDataRef.current, doc.numPages);
+
         fullyRenderedRef.current = true;
         setVisiblePage(1);
 
@@ -307,11 +379,21 @@ const PdfViewerPanel = forwardRef<PdfViewerHandle, Props>(function PdfViewerPane
         ioRef.current = io;
         host.querySelectorAll<HTMLElement>("[data-page-num]").forEach((w) => io.observe(w));
 
-        const pending = pendingSearchRef.current;
-        pendingSearchRef.current = null;
-        if (pending) {
-          const ok = executeSearchRef.current(pending);
-          if (!ok) onTextNotFoundRef.current?.();
+        const pendingReg = pendingRegistryScrollRef.current;
+        pendingRegistryScrollRef.current = false;
+        if (pendingReg) {
+          scrollToRegistryRef.current();
+        } else {
+          const pending = pendingSearchRef.current;
+          pendingSearchRef.current = null;
+          if (pending) {
+            const ok = executeSearchRef.current(
+              pending.query,
+              pending.sectionKey,
+              pending.context,
+            );
+            if (!ok) onTextNotFoundRef.current?.();
+          }
         }
       } catch {
         if (gen === renderGenRef.current) {
@@ -328,33 +410,59 @@ const PdfViewerPanel = forwardRef<PdfViewerHandle, Props>(function PdfViewerPane
   useImperativeHandle(
     ref,
     () => ({
-      findTextAndHighlight: (fileIndex: number, query: string) => {
+      findTextAndHighlight: (
+        fileIndex: number,
+        query: string,
+        sectionKey: string,
+        context?: string | null,
+      ) => {
         if (files.length === 0) {
           onTextNotFound?.();
           return;
         }
         const fi = Math.min(Math.max(0, fileIndex), files.length - 1);
         const q = query.trim();
-        if (q.length < 1) {
+        const sk = sectionKey.trim();
+        if (q.length < 1 || sk.length < 1) {
           onTextNotFound?.();
           return;
         }
 
         clearHighlights();
+        pendingRegistryScrollRef.current = false;
 
         if (fi !== activeFileIndex) {
-          pendingSearchRef.current = q;
+          pendingSearchRef.current = { query: q, sectionKey: sk, context };
           onActiveFileIndexChange(fi);
           return;
         }
 
         if (!fullyRenderedRef.current || !pdfDoc) {
-          pendingSearchRef.current = q;
+          pendingSearchRef.current = { query: q, sectionKey: sk, context };
           return;
         }
 
-        const ok = executeSearch(q);
+        const ok = executeSearch(q, sk, context);
         if (!ok) onTextNotFound?.();
+      },
+      scrollToBuildingRegistrySection: (fileIndex: number) => {
+        if (files.length === 0) return;
+        const fi = Math.min(Math.max(0, fileIndex), files.length - 1);
+        clearHighlights();
+        pendingSearchRef.current = null;
+
+        if (fi !== activeFileIndex) {
+          pendingRegistryScrollRef.current = true;
+          onActiveFileIndexChange(fi);
+          return;
+        }
+
+        if (!fullyRenderedRef.current || !pdfDoc) {
+          pendingRegistryScrollRef.current = true;
+          return;
+        }
+
+        scrollToBuildingRegistrySectionImpl();
       },
     }),
     [
@@ -364,6 +472,7 @@ const PdfViewerPanel = forwardRef<PdfViewerHandle, Props>(function PdfViewerPane
       onActiveFileIndexChange,
       clearHighlights,
       executeSearch,
+      scrollToBuildingRegistrySectionImpl,
       onTextNotFound,
     ],
   );
@@ -411,6 +520,7 @@ const PdfViewerPanel = forwardRef<PdfViewerHandle, Props>(function PdfViewerPane
               type="button"
               onClick={() => {
                 pendingSearchRef.current = null;
+                pendingRegistryScrollRef.current = false;
                 clearHighlights();
                 onActiveFileIndexChange(i);
               }}
