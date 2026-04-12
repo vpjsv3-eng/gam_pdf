@@ -69,6 +69,23 @@ export async function POST(request: Request) {
       );
     }
 
+    if (process.env.NODE_ENV === "development" && parsed && typeof parsed === "object") {
+      const parcels = (parsed as { parcels?: unknown[] }).parcels;
+      if (Array.isArray(parcels)) {
+        parcels.forEach((parcel, i) => {
+          if (!parcel || typeof parcel !== "object") return;
+          const p = parcel as Record<string, unknown>;
+          const bi = (p.basic_info ?? {}) as Record<string, unknown>;
+          const ow = (p.ownership ?? {}) as Record<string, unknown>;
+          const ctxKeys = [
+            ...Object.keys(bi).filter((k) => k.endsWith("_context")),
+            ...Object.keys(ow).filter((k) => k.endsWith("_context")),
+          ];
+          console.log("[analyze] parcel", i, "type=", p.type, "_context keys:", ctxKeys);
+        });
+      }
+    }
+
     return NextResponse.json(parsed);
   } catch (e) {
     const message = e instanceof Error ? e.message : "알 수 없는 오류";

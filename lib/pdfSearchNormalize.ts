@@ -2,15 +2,24 @@ import type { CharRange } from "@/lib/pdfTextMatch";
 import { isExactNumericBoundaryOk } from "@/lib/pdfTextMatch";
 
 /**
- * 검색어·PDF joined 등 동일 규칙 적용:
- * NBSP→공백, 줄바꿈→공백, 연속 공백 축약, trim
+ * 검색·페이지 포함 여부 판단에 공통 적용 (순서 고정)
  */
 export function normalizeText(text: string): string {
   return text
-    .replace(/\u00a0/g, " ")
     .replace(/\r\n|\r|\n/g, " ")
+    .replace(/\u00a0/g, " ")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+/** PDF 전체에 자주 나와 단독 검색이 위험한 값 — _context 없으면 fallback 금지 */
+const CONTEXT_REQUIRED_VALUES = new Set(["대", "전", "매매"]);
+
+export function requiresContextOnlyHighlight(value: string): boolean {
+  const t = normalizeText(value);
+  if (!t) return false;
+  if (t.length === 1) return true;
+  return CONTEXT_REQUIRED_VALUES.has(t);
 }
 
 /** @deprecated `normalizeText` 사용 */
@@ -32,9 +41,9 @@ function codePointLen(s: string, i: number): number {
   return c > 0xffff ? 2 : 1;
 }
 
-/** NBSP만 ASCII 공백으로 치환(길이 유지 → 하이라이트 인덱스와 일치) */
-function sanitizeJoined(joined: string): string {
-  return joined.replace(/\u00a0/g, " ");
+/** normalizeText와 동일한 전처리(인덱스는 원문 joined 기준 유지) */
+function preprocessJoinedForNormWalk(joined: string): string {
+  return joined.replace(/\r\n|\r|\n/g, " ").replace(/\u00a0/g, " ");
 }
 
 /**
@@ -44,7 +53,7 @@ function sanitizeJoined(joined: string): string {
 export function buildNormCharOrigStarts(joined: string): { norm: string; starts: number[] } {
   const starts: number[] = [];
   let norm = "";
-  const s = sanitizeJoined(joined);
+  const s = preprocessJoinedForNormWalk(joined);
   const { start: a, end: b } = trimRange(s);
   let i = a;
   let needSpace = false;
@@ -70,7 +79,7 @@ export function buildNormCharOrigStarts(joined: string): { norm: string; starts:
 }
 
 function origEndExclusive(joined: string, lastCharStart: number): number {
-  const s = sanitizeJoined(joined);
+  const s = preprocessJoinedForNormWalk(joined);
   return lastCharStart + codePointLen(s, lastCharStart);
 }
 

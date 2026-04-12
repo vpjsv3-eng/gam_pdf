@@ -13,6 +13,7 @@ import {
 import type { PDFDocumentProxy } from "pdfjs-dist";
 import { getPdfjs } from "@/lib/pdfjsClient";
 import { isPdfTextSpanStruckOrCancelled } from "@/lib/pdfTextLayerStrike";
+import { pdfHighlightDevLog } from "@/lib/pdfHighlightDev";
 import {
   computePdfSectionRanges,
   getBuildingRegistryStartPage,
@@ -21,6 +22,8 @@ import {
 import {
   findNormalizedNeedleRanges,
   findNormalizedValueRanges,
+  normalizeText,
+  requiresContextOnlyHighlight,
   sortCharRangesByStartDesc,
 } from "@/lib/pdfSearchNormalize";
 import {
@@ -50,6 +53,9 @@ type PageLayerData = {
   strings: string[];
   divs: HTMLElement[];
 };
+
+/** hit: 하이라이트 성공 · miss: 검색 실패(토스트) · aborted_ambiguous: 모호 값인데 _context 없음(토스트 없음) */
+export type PdfHighlightSearchResult = "hit" | "miss" | "aborted_ambiguous";
 
 type Props = {
   files: UploadedFile[];
@@ -141,43 +147,89 @@ const PdfViewerPanel = forwardRef<PdfViewerHandle, Props>(function PdfViewerPane
   );
 
   const executeSearch = useCallback(
-    (query: string, sectionKey: string, context?: string | null): boolean => {
+    (query: string, sectionKey: string, context?: string | null): PdfHighlightSearchResult => {
       const q = query.trim();
-      if (q.length < 1) return false;
+      if (q.length < 1) return "miss";
       clearHighlights();
       const sec = sectionRangesRef.current.find((r) => r.sectionKey === sectionKey);
-      if (!sec) return false;
+      if (!sec) {
+        pdfHighlightDevLog("no section range", { sectionKey, ranges: sectionRangesRef.current });
+        return "miss";
+      }
       const ctx = (context ?? "").trim();
+      const ambiguous = requiresContextOnlyHighlight(q);
+
+      pdfHighlightDevLog("executeSearch", {
+        sectionKey,
+        pages: [sec.startPage, sec.endPage],
+        query: q,
+        ambiguous,
+        hasContext: ctx.length > 0,
+        contextPreview: ctx.slice(0, 72),
+      });
+
+      if (ambiguous && !ctx) {
+        pdfHighlightDevLog("abort: ambiguous value without _context", q);
+        return "aborted_ambiguous";
+      }
 
       for (let p = sec.startPage; p <= sec.endPage; p++) {
         const data = pageDataRef.current.get(p);
         if (!data?.strings.length || !data.divs.length) continue;
         const { strings, divs } = data;
         const joined = strings.join("");
+        const pageNorm = normalizeText(joined);
 
         if (ctx.length > 0) {
-          const ctxRanges = findNormalizedNeedleRanges(joined, ctx);
-          for (const cr of ctxRanges) {
-            const inner = joined.slice(cr.start, cr.end);
-            const innerHits = findNormalizedValueRanges(inner, q).map((r) => ({
-              start: r.start + cr.start,
-              end: r.end + cr.start,
-            }));
-            for (const vr of sortCharRangesByStartDesc(innerHits)) {
-              if (tryApplyHighlight(strings, divs, vr)) return true;
+          const ctxNorm = normalizeText(ctx);
+          if (pageNorm.includes(ctxNorm)) {
+            pdfHighlightDevLog("context page hit (includes)", { page: p, sectionKey });
+            const ctxRanges = findNormalizedNeedleRanges(joined, ctx);
+            for (const cr of ctxRanges) {
+              const inner = joined.slice(cr.start, cr.end);
+              const innerHits = findNormalizedValueRanges(inner, q).map((r) => ({
+                start: r.start + cr.start,
+                end: r.end + cr.start,
+              }));
+              for (const vr of sortCharRangesByStartDesc(innerHits)) {
+                if (tryApplyHighlight(strings, divs, vr)) {
+                  pdfHighlightDevLog("highlight ok (context path)", { page: p });
+                  return "hit";
+                }
+              }
             }
+            if (ctxRanges.length === 0) {
+              pdfHighlightDevLog("includes matched but no orig ranges for context", { page: p });
+            }
+          } else {
+            pdfHighlightDevLog("context page miss (includes)", {
+              page: p,
+              ctxNormHead: ctxNorm.slice(0, 48),
+            });
           }
         }
 
+        if (ambiguous) {
+          continue;
+        }
+
         for (const vr of sortCharRangesByStartDesc(findNormalizedValueRanges(joined, q))) {
-          if (tryApplyHighlight(strings, divs, vr)) return true;
+          if (tryApplyHighlight(strings, divs, vr)) {
+            pdfHighlightDevLog("highlight ok (value-only norm)", { page: p });
+            return "hit";
+          }
         }
 
         for (const cand of sortCharRangesByStartDesc(collectPdfTextMatchRanges(strings, q))) {
-          if (tryApplyHighlight(strings, divs, cand)) return true;
+          if (tryApplyHighlight(strings, divs, cand)) {
+            pdfHighlightDevLog("highlight ok (raw fallback)", { page: p });
+            return "hit";
+          }
         }
       }
-      return false;
+
+      pdfHighlightDevLog("executeSearch miss", { sectionKey, query: q });
+      return "miss";
     },
     [clearHighlights, tryApplyHighlight],
   );
@@ -186,13 +238,26 @@ const PdfViewerPanel = forwardRef<PdfViewerHandle, Props>(function PdfViewerPane
     clearHighlights();
     const n = pdfDoc?.numPages ?? 0;
     const startPage = getBuildingRegistryStartPage(pageDataRef.current, n) ?? 1;
-    const host = pagesHostRef.current;
-    const wrap = host?.querySelector<HTMLElement>(`[data-page-num="${startPage}"]`);
-    if (wrap) {
-      requestAnimationFrame(() => {
-        wrap.scrollIntoView({ behavior: "instant", block: "start" });
-      });
-    }
+    const run = () => {
+      const host = pagesHostRef.current;
+      const scrollEl = scrollRef.current;
+      const wrap = host?.querySelector<HTMLElement>(`[data-page-num="${startPage}"]`);
+      if (wrap && scrollEl) {
+        const w = wrap.getBoundingClientRect();
+        const s = scrollEl.getBoundingClientRect();
+        const nextTop = scrollEl.scrollTop + (w.top - s.top) - 12;
+        scrollEl.scrollTo({ top: Math.max(0, nextTop), behavior: "instant" });
+        pdfHighlightDevLog("registry scroll", { startPage, scrollTop: scrollEl.scrollTop });
+      } else {
+        wrap?.scrollIntoView({ behavior: "instant", block: "start" });
+        pdfHighlightDevLog("registry scroll fallback", {
+          startPage,
+          hasWrap: Boolean(wrap),
+          hasScrollEl: Boolean(scrollEl),
+        });
+      }
+    };
+    requestAnimationFrame(() => requestAnimationFrame(run));
   }, [pdfDoc, clearHighlights]);
 
   const executeSearchRef = useRef(executeSearch);
@@ -352,6 +417,7 @@ const PdfViewerPanel = forwardRef<PdfViewerHandle, Props>(function PdfViewerPane
         if (cancelled || gen !== renderGenRef.current) return;
 
         sectionRangesRef.current = computePdfSectionRanges(pageDataRef.current, doc.numPages);
+        pdfHighlightDevLog("section ranges computed", sectionRangesRef.current);
 
         fullyRenderedRef.current = true;
         setVisiblePage(1);
@@ -387,12 +453,12 @@ const PdfViewerPanel = forwardRef<PdfViewerHandle, Props>(function PdfViewerPane
           const pending = pendingSearchRef.current;
           pendingSearchRef.current = null;
           if (pending) {
-            const ok = executeSearchRef.current(
+            const outcome = executeSearchRef.current(
               pending.query,
               pending.sectionKey,
               pending.context,
             );
-            if (!ok) onTextNotFoundRef.current?.();
+            if (outcome === "miss") onTextNotFoundRef.current?.();
           }
         }
       } catch {
@@ -442,8 +508,8 @@ const PdfViewerPanel = forwardRef<PdfViewerHandle, Props>(function PdfViewerPane
           return;
         }
 
-        const ok = executeSearch(q, sk, context);
-        if (!ok) onTextNotFound?.();
+        const outcome = executeSearch(q, sk, context);
+        if (outcome === "miss") onTextNotFound?.();
       },
       scrollToBuildingRegistrySection: (fileIndex: number) => {
         if (files.length === 0) return;
