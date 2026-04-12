@@ -21,8 +21,8 @@ type UploadedFile = {
   size: number;
 };
 
-function fieldContext(data: Record<string, unknown>, fieldKey: string): string | undefined {
-  const raw = data[`${fieldKey}_context`];
+function fieldAnchor(data: Record<string, unknown>, fieldKey: string): string | undefined {
+  const raw = data[`${fieldKey}_anchor`];
   if (typeof raw !== "string") return undefined;
   const t = raw.trim();
   return t.length > 0 ? t : undefined;
@@ -33,20 +33,20 @@ function SourceLink({
   onGoTo,
   text,
   sectionKey,
-  context,
+  anchor,
 }: {
   fileCount: number;
-  onGoTo: (fileIndex: number, highlightText: string, sectionKey: string, context?: string) => void;
+  onGoTo: (fileIndex: number, highlightText: string, sectionKey: string, anchor?: string) => void;
   text: string;
   sectionKey: string;
-  context?: string;
+  anchor?: string;
 }) {
   const t = text.trim();
   if (fileCount <= 0 || !t) return null;
   return (
     <button
       type="button"
-      onClick={() => onGoTo(0, t, sectionKey, context)}
+      onClick={() => onGoTo(0, t, sectionKey, anchor)}
       className="shrink-0 text-xs text-sky-600 underline-offset-2 hover:underline"
     >
       🔍 원본
@@ -60,14 +60,14 @@ function DetailRow({
   fileCount,
   onGoTo,
   sectionKey,
-  context,
+  anchor,
 }: {
   label: string;
   value: string;
   fileCount: number;
-  onGoTo: (fileIndex: number, highlightText: string, sectionKey: string, context?: string) => void;
+  onGoTo: (fileIndex: number, highlightText: string, sectionKey: string, anchor?: string) => void;
   sectionKey: string;
-  context?: string;
+  anchor?: string;
 }) {
   const v = value.trim();
   return (
@@ -80,7 +80,7 @@ function DetailRow({
           onGoTo={onGoTo}
           text={v}
           sectionKey={sectionKey}
-          context={context}
+          anchor={anchor}
         />
       </div>
     </div>
@@ -150,7 +150,7 @@ function RegistryParcelPanel({
     fileIndex: number,
     highlightText: string,
     sectionKey: string,
-    context?: string,
+    anchor?: string,
   ) => void;
 }) {
   const bi = (parcel.basic_info ?? {}) as Record<string, unknown>;
@@ -170,7 +170,7 @@ function RegistryParcelPanel({
             기본 정보
           </p>
           {Object.entries(bi)
-            .filter(([k]) => !k.endsWith("_context"))
+            .filter(([k]) => !k.endsWith("_anchor"))
             .map(([k, v]) => (
               <DetailRow
                 key={k}
@@ -179,7 +179,7 @@ function RegistryParcelPanel({
                 fileCount={fileCount}
                 onGoTo={onGoToSource}
                 sectionKey={sectionKey}
-                context={fieldContext(bi, k)}
+                anchor={fieldAnchor(bi, k)}
               />
             ))}
         </div>
@@ -191,7 +191,7 @@ function RegistryParcelPanel({
             소유권
           </p>
           {Object.entries(o)
-            .filter(([k]) => k !== "이전이력" && !k.endsWith("_context"))
+            .filter(([k]) => k !== "이전이력" && !k.endsWith("_anchor"))
             .map(([k, v]) => (
               <DetailRow
                 key={k}
@@ -200,7 +200,7 @@ function RegistryParcelPanel({
                 fileCount={fileCount}
                 onGoTo={onGoToSource}
                 sectionKey={sectionKey}
-                context={fieldContext(o, k)}
+                anchor={fieldAnchor(o, k)}
               />
             ))}
           {Array.isArray(o.이전이력) && o.이전이력.length > 0 && (
@@ -227,7 +227,7 @@ function RegistryParcelPanel({
             fileCount={fileCount}
             onGoTo={onGoToSource}
             sectionKey={sectionKey}
-            context={fieldContext(r as unknown as Record<string, unknown>, "지상권")}
+            anchor={fieldAnchor(r as unknown as Record<string, unknown>, "지상권")}
           />
           <DetailRow
             label="압류·가압류"
@@ -237,7 +237,7 @@ function RegistryParcelPanel({
             fileCount={fileCount}
             onGoTo={onGoToSource}
             sectionKey={sectionKey}
-            context={fieldContext(r as unknown as Record<string, unknown>, "압류가압류")}
+            anchor={fieldAnchor(r as unknown as Record<string, unknown>, "압류가압류")}
           />
           <div className="py-2 text-sm">
             <div className="mb-2 font-medium text-zinc-700">근저당권</div>
@@ -269,7 +269,7 @@ function RegistryParcelPanel({
                                   onGoTo={onGoToSource}
                                   text={String(m[col] ?? "")}
                                   sectionKey={sectionKey}
-                                  context={fieldContext(row, col)}
+                                  anchor={fieldAnchor(row, col)}
                                 />
                               </div>
                             </td>
@@ -448,8 +448,8 @@ export default function RealtyAnalyzer() {
   }, []);
 
   const goToSourceText = useCallback(
-    (fileIndex: number, highlightText: string, sectionKey: string, context?: string) => {
-      pdfRef.current?.findTextAndHighlight(fileIndex, highlightText, sectionKey, context);
+    (fileIndex: number, highlightText: string, sectionKey: string, anchor?: string) => {
+      pdfRef.current?.findTextAndHighlight(fileIndex, highlightText, sectionKey, anchor);
     },
     [],
   );

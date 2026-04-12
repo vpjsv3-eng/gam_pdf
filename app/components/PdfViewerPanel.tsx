@@ -23,7 +23,6 @@ import {
   findNormalizedNeedleRanges,
   findNormalizedValueRanges,
   normalizeText,
-  requiresContextOnlyHighlight,
   sortCharRangesByStartDesc,
 } from "@/lib/pdfSearchNormalize";
 import {
@@ -31,6 +30,41 @@ import {
   collectPdfTextMatchRanges,
   spanIndicesForCharRange,
 } from "@/lib/pdfTextMatch";
+
+/** anchor가 포함된 페이지에서, anchor 이후 구간부터 값 하이라이트 시도 */
+function tryHighlightValueAfterAnchorOnPage(
+  strings: string[],
+  divs: HTMLElement[],
+  joined: string,
+  value: string,
+  anchor: string,
+  tryApplyHighlight: (s: string[], d: HTMLElement[], cand: { start: number; end: number }) => boolean,
+): boolean {
+  const a = anchor.trim();
+  if (!a) return false;
+  const pageNorm = normalizeText(joined);
+  const anchorNorm = normalizeText(a);
+  if (!pageNorm.includes(anchorNorm)) return false;
+
+  const anchorRanges = findNormalizedNeedleRanges(joined, a);
+  const byStart = [...anchorRanges].sort((x, y) => x.start - y.start);
+  for (const ar of byStart) {
+    const tail = joined.slice(ar.start);
+    const normHits = findNormalizedValueRanges(tail, value).map((r) => ({
+      start: r.start + ar.start,
+      end: r.end + ar.start,
+    }));
+    for (const vr of normHits) {
+      if (tryApplyHighlight(strings, divs, vr)) return true;
+    }
+    for (const cand of sortCharRangesByStartDesc(
+      collectPdfTextMatchRanges(strings, value).filter((c) => c.start >= ar.start),
+    )) {
+      if (tryApplyHighlight(strings, divs, cand)) return true;
+    }
+  }
+  return false;
+}
 
 type UploadedFile = {
   id: string;
@@ -43,7 +77,7 @@ export type PdfViewerHandle = {
     fileIndex: number,
     query: string,
     sectionKey: string,
-    context?: string | null,
+    anchor?: string | null,
   ) => void;
   /** 건축물대장 구간 첫 페이지로만 이동(텍스트 검색·하이라이트 없음) */
   scrollToBuildingRegistrySection: (fileIndex: number) => void;
@@ -54,8 +88,8 @@ type PageLayerData = {
   divs: HTMLElement[];
 };
 
-/** hit: 하이라이트 성공 · miss: 검색 실패(토스트) · aborted_ambiguous: 모호 값인데 _context 없음(토스트 없음) */
-export type PdfHighlightSearchResult = "hit" | "miss" | "aborted_ambiguous";
+/** hit: 하이라이트 성공 · miss: 검색 실패(토스트) */
+export type PdfHighlightSearchResult = "hit" | "miss";
 
 type Props = {
   files: UploadedFile[];
@@ -89,7 +123,7 @@ const PdfViewerPanel = forwardRef<PdfViewerHandle, Props>(function PdfViewerPane
   const pendingSearchRef = useRef<{
     query: string;
     sectionKey: string;
-    context?: string | null;
+    anchor?: string | null;
   } | null>(null);
   const pendingRegistryScrollRef = useRef(false);
   const fullyRenderedRef = useRef(false);
@@ -147,7 +181,7 @@ const PdfViewerPanel = forwardRef<PdfViewerHandle, Props>(function PdfViewerPane
   );
 
   const executeSearch = useCallback(
-    (query: string, sectionKey: string, context?: string | null): PdfHighlightSearchResult => {
+    (query: string, sectionKey: string, anchor?: string | null): PdfHighlightSearchResult => {
       const q = query.trim();
       if (q.length < 1) return "miss";
       clearHighlights();
@@ -156,21 +190,37 @@ const PdfViewerPanel = forwardRef<PdfViewerHandle, Props>(function PdfViewerPane
         pdfHighlightDevLog("no section range", { sectionKey, ranges: sectionRangesRef.current });
         return "miss";
       }
-      const ctx = (context ?? "").trim();
-      const ambiguous = requiresContextOnlyHighlight(q);
+      console.log("원본 검색 섹션 범위:", {
+        sectionKey,
+        startPage: sec.startPage,
+        endPage: sec.endPage,
+      });
+      const anchorTrim = (anchor ?? "").trim();
+      const valueNorm = normalizeText(q);
 
       pdfHighlightDevLog("executeSearch", {
         sectionKey,
         pages: [sec.startPage, sec.endPage],
         query: q,
-        ambiguous,
-        hasContext: ctx.length > 0,
-        contextPreview: ctx.slice(0, 72),
+        hasAnchor: anchorTrim.length > 0,
+        anchorPreview: anchorTrim.slice(0, 48),
       });
 
-      if (ambiguous && !ctx) {
-        pdfHighlightDevLog("abort: ambiguous value without _context", q);
-        return "aborted_ambiguous";
+      if (anchorTrim) {
+        const anchorNorm = normalizeText(anchorTrim);
+        for (let p = sec.startPage; p <= sec.endPage; p++) {
+          const data = pageDataRef.current.get(p);
+          if (!data?.strings.length || !data.divs.length) continue;
+          const { strings, divs } = data;
+          const joined = strings.join("");
+          const pageNorm = normalizeText(joined);
+          if (!pageNorm.includes(anchorNorm)) continue;
+          if (tryHighlightValueAfterAnchorOnPage(strings, divs, joined, q, anchorTrim, tryApplyHighlight)) {
+            pdfHighlightDevLog("highlight ok (anchor path)", { page: p, sectionKey });
+            return "hit";
+          }
+          pdfHighlightDevLog("anchor on page but highlight failed", { page: p, sectionKey });
+        }
       }
 
       for (let p = sec.startPage; p <= sec.endPage; p++) {
@@ -179,39 +229,7 @@ const PdfViewerPanel = forwardRef<PdfViewerHandle, Props>(function PdfViewerPane
         const { strings, divs } = data;
         const joined = strings.join("");
         const pageNorm = normalizeText(joined);
-
-        if (ctx.length > 0) {
-          const ctxNorm = normalizeText(ctx);
-          if (pageNorm.includes(ctxNorm)) {
-            pdfHighlightDevLog("context page hit (includes)", { page: p, sectionKey });
-            const ctxRanges = findNormalizedNeedleRanges(joined, ctx);
-            for (const cr of ctxRanges) {
-              const inner = joined.slice(cr.start, cr.end);
-              const innerHits = findNormalizedValueRanges(inner, q).map((r) => ({
-                start: r.start + cr.start,
-                end: r.end + cr.start,
-              }));
-              for (const vr of sortCharRangesByStartDesc(innerHits)) {
-                if (tryApplyHighlight(strings, divs, vr)) {
-                  pdfHighlightDevLog("highlight ok (context path)", { page: p });
-                  return "hit";
-                }
-              }
-            }
-            if (ctxRanges.length === 0) {
-              pdfHighlightDevLog("includes matched but no orig ranges for context", { page: p });
-            }
-          } else {
-            pdfHighlightDevLog("context page miss (includes)", {
-              page: p,
-              ctxNormHead: ctxNorm.slice(0, 48),
-            });
-          }
-        }
-
-        if (ambiguous) {
-          continue;
-        }
+        if (!pageNorm.includes(valueNorm)) continue;
 
         for (const vr of sortCharRangesByStartDesc(findNormalizedValueRanges(joined, q))) {
           if (tryApplyHighlight(strings, divs, vr)) {
@@ -219,7 +237,6 @@ const PdfViewerPanel = forwardRef<PdfViewerHandle, Props>(function PdfViewerPane
             return "hit";
           }
         }
-
         for (const cand of sortCharRangesByStartDesc(collectPdfTextMatchRanges(strings, q))) {
           if (tryApplyHighlight(strings, divs, cand)) {
             pdfHighlightDevLog("highlight ok (raw fallback)", { page: p });
@@ -416,8 +433,10 @@ const PdfViewerPanel = forwardRef<PdfViewerHandle, Props>(function PdfViewerPane
 
         if (cancelled || gen !== renderGenRef.current) return;
 
-        sectionRangesRef.current = computePdfSectionRanges(pageDataRef.current, doc.numPages);
-        pdfHighlightDevLog("section ranges computed", sectionRangesRef.current);
+        const sectionRanges = computePdfSectionRanges(pageDataRef.current, doc.numPages);
+        sectionRangesRef.current = sectionRanges;
+        console.log("섹션 범위:", sectionRanges);
+        pdfHighlightDevLog("section ranges computed", sectionRanges);
 
         fullyRenderedRef.current = true;
         setVisiblePage(1);
@@ -456,7 +475,7 @@ const PdfViewerPanel = forwardRef<PdfViewerHandle, Props>(function PdfViewerPane
             const outcome = executeSearchRef.current(
               pending.query,
               pending.sectionKey,
-              pending.context,
+              pending.anchor,
             );
             if (outcome === "miss") onTextNotFoundRef.current?.();
           }
@@ -480,7 +499,7 @@ const PdfViewerPanel = forwardRef<PdfViewerHandle, Props>(function PdfViewerPane
         fileIndex: number,
         query: string,
         sectionKey: string,
-        context?: string | null,
+        anchor?: string | null,
       ) => {
         if (files.length === 0) {
           onTextNotFound?.();
@@ -498,17 +517,17 @@ const PdfViewerPanel = forwardRef<PdfViewerHandle, Props>(function PdfViewerPane
         pendingRegistryScrollRef.current = false;
 
         if (fi !== activeFileIndex) {
-          pendingSearchRef.current = { query: q, sectionKey: sk, context };
+          pendingSearchRef.current = { query: q, sectionKey: sk, anchor };
           onActiveFileIndexChange(fi);
           return;
         }
 
         if (!fullyRenderedRef.current || !pdfDoc) {
-          pendingSearchRef.current = { query: q, sectionKey: sk, context };
+          pendingSearchRef.current = { query: q, sectionKey: sk, anchor };
           return;
         }
 
-        const outcome = executeSearch(q, sk, context);
+        const outcome = executeSearch(q, sk, anchor);
         if (outcome === "miss") onTextNotFound?.();
       },
       scrollToBuildingRegistrySection: (fileIndex: number) => {

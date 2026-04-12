@@ -12,16 +12,6 @@ export function normalizeText(text: string): string {
     .trim();
 }
 
-/** PDF 전체에 자주 나와 단독 검색이 위험한 값 — _context 없으면 fallback 금지 */
-const CONTEXT_REQUIRED_VALUES = new Set(["대", "전", "매매"]);
-
-export function requiresContextOnlyHighlight(value: string): boolean {
-  const t = normalizeText(value);
-  if (!t) return false;
-  if (t.length === 1) return true;
-  return CONTEXT_REQUIRED_VALUES.has(t);
-}
-
 /** @deprecated `normalizeText` 사용 */
 export function normalizeForSearch(s: string): string {
   return normalizeText(s);

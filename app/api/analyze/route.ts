@@ -77,11 +77,11 @@ export async function POST(request: Request) {
           const p = parcel as Record<string, unknown>;
           const bi = (p.basic_info ?? {}) as Record<string, unknown>;
           const ow = (p.ownership ?? {}) as Record<string, unknown>;
-          const ctxKeys = [
-            ...Object.keys(bi).filter((k) => k.endsWith("_context")),
-            ...Object.keys(ow).filter((k) => k.endsWith("_context")),
+          const anchorKeys = [
+            ...Object.keys(bi).filter((k) => k.endsWith("_anchor")),
+            ...Object.keys(ow).filter((k) => k.endsWith("_anchor")),
           ];
-          console.log("[analyze] parcel", i, "type=", p.type, "_context keys:", ctxKeys);
+          console.log("[analyze] parcel", i, "type=", p.type, "_anchor keys:", anchorKeys);
         });
       }
     }
