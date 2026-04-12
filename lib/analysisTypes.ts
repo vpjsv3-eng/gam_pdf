@@ -4,22 +4,22 @@ import type { MaybeSourced, Sourced } from "@/lib/sourcedField";
 
 export type RegistryParcelType = "토지" | "건물";
 
-/** 토지 등기 단위 basic_info */
+/** 토지 등기 단위 basic_info (도로명주소는 토지 표제부에 없음 — 키를 넣지 않음) */
 export type LandParcelBasicInfo = {
   지목?: string | null;
   면적?: string | null;
-  도로명주소?: string | null;
   용도지역?: string | null;
   [key: string]: unknown;
 };
 
-/** 건물 등기 단위 basic_info */
+/** 건물 등기 단위 basic_info (도로명주소는 건물 표제부·대장에서만) */
 export type BuildingParcelBasicInfo = {
   구조?: string | null;
   지붕?: string | null;
   용도?: string | null;
   층수?: string | null;
   연면적?: string | null;
+  도로명주소?: string | null;
   [key: string]: unknown;
 };
 
