@@ -2,10 +2,17 @@ import type { NextConfig } from "next";
 import path from "path";
 import { loadEnvConfig } from "@next/env";
 
-/** monorepo 상위(cursol/)의 .env.local도 읽기 — 앱 폴더 설정이 있으면 덮어씀 */
+/**
+ * 로컬: 상위(cursol/) .env.local 후 앱 폴더 덮어쓰기.
+ * Vercel: 저장소 루트만 클론되므로 상위 경로 로드 생략(빌드/런타임 혼선 방지).
+ */
 const projectDir = process.cwd();
-loadEnvConfig(path.join(projectDir, ".."));
-loadEnvConfig(projectDir);
+if (process.env.VERCEL) {
+  loadEnvConfig(projectDir);
+} else {
+  loadEnvConfig(path.join(projectDir, ".."));
+  loadEnvConfig(projectDir);
+}
 
 const nextConfig: NextConfig = {};
 
