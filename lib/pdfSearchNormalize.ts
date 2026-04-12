@@ -1,9 +1,21 @@
 import type { CharRange } from "@/lib/pdfTextMatch";
 import { isExactNumericBoundaryOk } from "@/lib/pdfTextMatch";
 
-/** trim + 연속 공백 → 단일 공백 (검색어·PDF joined 동일 적용) */
+/**
+ * 검색어·PDF joined 등 동일 규칙 적용:
+ * NBSP→공백, 줄바꿈→공백, 연속 공백 축약, trim
+ */
+export function normalizeText(text: string): string {
+  return text
+    .replace(/\u00a0/g, " ")
+    .replace(/\r\n|\r|\n/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/** @deprecated `normalizeText` 사용 */
 export function normalizeForSearch(s: string): string {
-  return s.trim().replace(/\s+/g, " ");
+  return normalizeText(s);
 }
 
 function trimRange(s: string): { start: number; end: number } {
@@ -20,6 +32,11 @@ function codePointLen(s: string, i: number): number {
   return c > 0xffff ? 2 : 1;
 }
 
+/** NBSP만 ASCII 공백으로 치환(길이 유지 → 하이라이트 인덱스와 일치) */
+function sanitizeJoined(joined: string): string {
+  return joined.replace(/\u00a0/g, " ");
+}
+
 /**
  * joined와 동일한 규칙으로 만든 norm 문자열과,
  * norm[j]에 해당하는 원문 joined 내 시작 인덱스(코드 단위) 배열 (len = norm.length)
@@ -27,15 +44,16 @@ function codePointLen(s: string, i: number): number {
 export function buildNormCharOrigStarts(joined: string): { norm: string; starts: number[] } {
   const starts: number[] = [];
   let norm = "";
-  const { start: a, end: b } = trimRange(joined);
+  const s = sanitizeJoined(joined);
+  const { start: a, end: b } = trimRange(s);
   let i = a;
   let needSpace = false;
   let lastWsStart = a;
 
   while (i < b) {
-    if (/\s/.test(joined[i]!)) {
+    if (/\s/.test(s[i]!)) {
       lastWsStart = i;
-      while (i < b && /\s/.test(joined[i]!)) i++;
+      while (i < b && /\s/.test(s[i]!)) i++;
       needSpace = true;
       continue;
     }
@@ -45,14 +63,15 @@ export function buildNormCharOrigStarts(joined: string): { norm: string; starts:
       needSpace = false;
     }
     starts.push(i);
-    norm += joined[i]!;
-    i += codePointLen(joined, i);
+    norm += s[i]!;
+    i += codePointLen(s, i);
   }
   return { norm, starts };
 }
 
 function origEndExclusive(joined: string, lastCharStart: number): number {
-  return lastCharStart + codePointLen(joined, lastCharStart);
+  const s = sanitizeJoined(joined);
+  return lastCharStart + codePointLen(s, lastCharStart);
 }
 
 function origRangeForNormMatch(
@@ -69,7 +88,7 @@ function origRangeForNormMatch(
 
 /** normalized needle이 등장하는 모든 (원문 joined 기준) [start,end) 구간 */
 export function findNormalizedNeedleRanges(joined: string, needle: string): CharRange[] {
-  const nq = normalizeForSearch(needle);
+  const nq = normalizeText(needle);
   if (!nq) return [];
   const { norm, starts } = buildNormCharOrigStarts(joined);
   if (norm.length < nq.length) return [];
@@ -89,4 +108,12 @@ export function findNormalizedValueRanges(joined: string, value: string): CharRa
   return findNormalizedNeedleRanges(joined, q).filter((r) =>
     isExactNumericBoundaryOk(joined, r.start, r.end, q),
   );
+}
+
+/** 같은 시작 위치면 더 긴 구간이 앞서도록: 먼저 뒤쪽(보통 최신 행)부터 시도 */
+export function sortCharRangesByStartDesc(ranges: CharRange[]): CharRange[] {
+  return [...ranges].sort((a, b) => {
+    if (b.start !== a.start) return b.start - a.start;
+    return a.end - a.end - (b.end - b.start);
+  });
 }

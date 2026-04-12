@@ -21,6 +21,7 @@ import {
 import {
   findNormalizedNeedleRanges,
   findNormalizedValueRanges,
+  sortCharRangesByStartDesc,
 } from "@/lib/pdfSearchNormalize";
 import {
   PDF_HIGHLIGHT_BG,
@@ -157,23 +158,22 @@ const PdfViewerPanel = forwardRef<PdfViewerHandle, Props>(function PdfViewerPane
         if (ctx.length > 0) {
           const ctxRanges = findNormalizedNeedleRanges(joined, ctx);
           for (const cr of ctxRanges) {
-            const winStart = Math.max(0, cr.start - 1200);
-            const winEnd = Math.min(joined.length, cr.end + 2400);
-            const valRanges = findNormalizedValueRanges(joined, q)
-              .filter((r) => r.start >= winStart && r.end <= winEnd)
-              .sort((a, b) => a.start - b.start);
-            for (const vr of valRanges) {
+            const inner = joined.slice(cr.start, cr.end);
+            const innerHits = findNormalizedValueRanges(inner, q).map((r) => ({
+              start: r.start + cr.start,
+              end: r.end + cr.start,
+            }));
+            for (const vr of sortCharRangesByStartDesc(innerHits)) {
               if (tryApplyHighlight(strings, divs, vr)) return true;
             }
           }
         }
 
-        const normRanges = findNormalizedValueRanges(joined, q).sort((a, b) => a.start - b.start);
-        for (const vr of normRanges) {
+        for (const vr of sortCharRangesByStartDesc(findNormalizedValueRanges(joined, q))) {
           if (tryApplyHighlight(strings, divs, vr)) return true;
         }
 
-        for (const cand of collectPdfTextMatchRanges(strings, q)) {
+        for (const cand of sortCharRangesByStartDesc(collectPdfTextMatchRanges(strings, q))) {
           if (tryApplyHighlight(strings, divs, cand)) return true;
         }
       }
