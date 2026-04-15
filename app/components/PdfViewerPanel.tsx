@@ -28,6 +28,7 @@ import {
   findNormalizedValueRanges,
   normalizeText,
   pdfHighlightQueryFromDisplayValue,
+  pdfHighlightQueryVariants,
   sortCharRangesByStartDesc,
 } from "@/lib/pdfSearchNormalize";
 import {
@@ -101,6 +102,78 @@ type PageLayerData = {
   strings: string[];
   divs: HTMLElement[];
 };
+
+function maxPageFromPageData(pageData: Map<number, PageLayerData>): number {
+  let m = 0;
+  for (const k of pageData.keys()) m = Math.max(m, k);
+  return m > 0 ? m : 1;
+}
+
+function firstPageMatchingBuildingHeader(
+  pageData: Map<number, PageLayerData>,
+  numPages: number,
+): number | null {
+  for (let p = 1; p <= numPages; p++) {
+    const joined = (pageData.get(p)?.strings ?? []).join("");
+    const flat = joined.replace(/\s/g, "");
+    if (
+      joined.includes("[건물]") ||
+      flat.includes("-건물-") ||
+      flat.includes("-건물[제출용]-") ||
+      flat.includes("건물[제출용]") ||
+      (flat.includes("등기사항전부증명서") && flat.includes("건물") && !flat.includes("토지"))
+    ) {
+      return p;
+    }
+  }
+  return null;
+}
+
+/**
+ * UI 탭의 sectionKey와 PDF 자동 구간이 어긋나도 검색·스크롤이 동작하도록 범위 보정.
+ * (건축물대장 구간 미검출 시 전체 PDF에서 검색 등)
+ */
+function resolveSearchSectionRange(
+  sk: string,
+  ranges: PdfSectionRange[],
+  pageData: Map<number, PageLayerData>,
+): PdfSectionRange | null {
+  const exact = ranges.find((r) => r.sectionKey === sk);
+  if (exact) return exact;
+
+  const numPages = maxPageFromPageData(pageData);
+  const skTrim = sk.trim();
+
+  if (skTrim === "건축물대장" || skTrim.includes("건축물대장")) {
+    const fuzzy = ranges.find((r) => r.sectionKey.includes("건축물"));
+    if (fuzzy) return fuzzy;
+    const sp = getBuildingRegistryStartPage(pageData, numPages);
+    if (sp != null) return { sectionKey: "건축물대장", startPage: sp, endPage: numPages };
+    return { sectionKey: "건축물대장", startPage: 1, endPage: numPages };
+  }
+
+  const m = /^건물\s+(\d+)$/.exec(skTrim);
+  if (m) {
+    const buildingRanges = ranges.filter((r) => /^건물\s+\d+$/.test(r.sectionKey));
+    if (buildingRanges.length === 0) {
+      const p0 = firstPageMatchingBuildingHeader(pageData, numPages);
+      if (p0 != null) return { sectionKey: skTrim, startPage: p0, endPage: numPages };
+      return null;
+    }
+    const want = parseInt(m[1]!, 10);
+    const byKey = buildingRanges.find((r) => r.sectionKey === skTrim);
+    if (byKey) return byKey;
+    if (buildingRanges.length === 1) return buildingRanges[0]!;
+    const sorted = [...buildingRanges].sort((a, b) => {
+      const na = parseInt(a.sectionKey.replace(/^건물\s+/, ""), 10);
+      const nb = parseInt(b.sectionKey.replace(/^건물\s+/, ""), 10);
+      return na - nb;
+    });
+    return sorted[want - 1] ?? sorted[sorted.length - 1] ?? null;
+  }
+
+  return null;
+}
 
 /** hit: 하이라이트 성공 · partial: 문구는 못 찾았으나 해당 섹션 첫 페이지로 스크롤 · miss: 섹션 없음 등 */
 export type PdfHighlightSearchResult = "hit" | "partial" | "miss";
@@ -180,15 +253,15 @@ const PdfViewerPanelInner = forwardRef<PdfViewerHandle, Props>(function PdfViewe
       const host = pagesHostRef.current;
       const scrollEl = scrollRef.current;
       const wrap = host?.querySelector<HTMLElement>(`[data-page-num="${pageNum}"]`);
-      if (wrap && scrollEl) {
-        const w = wrap.getBoundingClientRect();
-        const s = scrollEl.getBoundingClientRect();
-        const nextTop = scrollEl.scrollTop + (w.top - s.top) - 16;
+      if (!wrap) return;
+      wrap.scrollIntoView({ behavior: "instant", block: "start", inline: "nearest" });
+      const s = scrollEl?.getBoundingClientRect();
+      const w = wrap.getBoundingClientRect();
+      if (scrollEl && s && w.height > 0) {
+        const nextTop = scrollEl.scrollTop + (w.top - s.top) - 12;
         scrollEl.scrollTo({ top: Math.max(0, nextTop), behavior: "instant" });
-        pdfHighlightDevLog("scrollPdfPageIntoView", { pageNum, scrollTop: scrollEl.scrollTop });
-      } else {
-        wrap?.scrollIntoView({ behavior: "instant", block: "start" });
       }
+      pdfHighlightDevLog("scrollPdfPageIntoView", { pageNum });
     };
     requestAnimationFrame(() => requestAnimationFrame(run));
   }, []);
@@ -223,7 +296,11 @@ const PdfViewerPanelInner = forwardRef<PdfViewerHandle, Props>(function PdfViewe
       const q = pdfHighlightQueryFromDisplayValue(qRaw);
       if (q.length < 1) return "miss";
       clearHighlights();
-      const sec = sectionRangesRef.current.find((r) => r.sectionKey === sectionKey);
+      const sec = resolveSearchSectionRange(
+        sectionKey,
+        sectionRangesRef.current,
+        pageDataRef.current,
+      );
       if (!sec) {
         pdfHighlightDevLog("no section range", { sectionKey, ranges: sectionRangesRef.current });
         return "miss";
@@ -236,13 +313,16 @@ const PdfViewerPanelInner = forwardRef<PdfViewerHandle, Props>(function PdfViewe
         });
       }
       const anchorTrim = (anchor ?? "").trim();
-      const valueNorm = normalizeText(q);
+      const queryVariants = [...new Set([q, ...pdfHighlightQueryVariants(qRaw)])].filter(
+        (s) => s.trim().length > 0,
+      );
 
       pdfHighlightDevLog("executeSearch", {
         sectionKey,
         pages: [sec.startPage, sec.endPage],
         query: q,
         queryRaw: qRaw,
+        variants: queryVariants,
         hasAnchor: anchorTrim.length > 0,
         anchorPreview: anchorTrim.slice(0, 48),
       });
@@ -256,32 +336,47 @@ const PdfViewerPanelInner = forwardRef<PdfViewerHandle, Props>(function PdfViewe
           const joined = strings.join("");
           const pageNorm = normalizeText(joined);
           if (!pageNorm.includes(anchorNorm)) continue;
-          if (tryHighlightValueAfterAnchorOnPage(strings, divs, joined, q, anchorTrim, tryApplyHighlight)) {
-            pdfHighlightDevLog("highlight ok (anchor path)", { page: p, sectionKey });
-            return "hit";
+          for (const qTry of queryVariants) {
+            if (
+              tryHighlightValueAfterAnchorOnPage(
+                strings,
+                divs,
+                joined,
+                qTry,
+                anchorTrim,
+                tryApplyHighlight,
+              )
+            ) {
+              pdfHighlightDevLog("highlight ok (anchor path)", { page: p, sectionKey, qTry });
+              return "hit";
+            }
           }
           pdfHighlightDevLog("anchor on page but highlight failed", { page: p, sectionKey });
         }
       }
 
-      for (let p = sec.startPage; p <= sec.endPage; p++) {
-        const data = pageDataRef.current.get(p);
-        if (!data?.strings.length || !data.divs.length) continue;
-        const { strings, divs } = data;
-        const joined = strings.join("");
-        const pageNorm = normalizeText(joined);
-        if (!pageNorm.includes(valueNorm)) continue;
+      for (const qTry of queryVariants) {
+        const valueNorm = normalizeText(qTry);
+        if (valueNorm.length < 1) continue;
+        for (let p = sec.startPage; p <= sec.endPage; p++) {
+          const data = pageDataRef.current.get(p);
+          if (!data?.strings.length || !data.divs.length) continue;
+          const { strings, divs } = data;
+          const joined = strings.join("");
+          const pageNorm = normalizeText(joined);
+          if (!pageNorm.includes(valueNorm)) continue;
 
-        for (const vr of sortCharRangesByStartDesc(findNormalizedValueRanges(joined, q))) {
-          if (tryApplyHighlight(strings, divs, vr)) {
-            pdfHighlightDevLog("highlight ok (value-only norm)", { page: p });
-            return "hit";
+          for (const vr of sortCharRangesByStartDesc(findNormalizedValueRanges(joined, qTry))) {
+            if (tryApplyHighlight(strings, divs, vr)) {
+              pdfHighlightDevLog("highlight ok (value-only norm)", { page: p, qTry });
+              return "hit";
+            }
           }
-        }
-        for (const cand of sortCharRangesByStartDesc(collectPdfTextMatchRanges(strings, q))) {
-          if (tryApplyHighlight(strings, divs, cand)) {
-            pdfHighlightDevLog("highlight ok (raw fallback)", { page: p });
-            return "hit";
+          for (const cand of sortCharRangesByStartDesc(collectPdfTextMatchRanges(strings, qTry))) {
+            if (tryApplyHighlight(strings, divs, cand)) {
+              pdfHighlightDevLog("highlight ok (raw fallback)", { page: p, qTry });
+              return "hit";
+            }
           }
         }
       }
@@ -488,9 +583,19 @@ const PdfViewerPanelInner = forwardRef<PdfViewerHandle, Props>(function PdfViewe
 
           const pageBox = document.createElement("div");
           pageBox.className = "relative overflow-visible shadow-md";
+          pageBox.style.boxSizing = "border-box";
           pageBox.style.width = `${Math.ceil(displayViewport.width)}px`;
-          pageBox.style.height = `${Math.ceil(displayViewport.height)}px`;
+          const pageTopSlop = 18;
+          const innerTopSlop = 10;
+          pageBox.style.paddingTop = `${pageTopSlop}px`;
           pageBox.style.setProperty("--total-scale-factor", String(cssScale));
+
+          const inner = document.createElement("div");
+          inner.className = "relative overflow-visible";
+          inner.style.boxSizing = "border-box";
+          inner.style.width = `${Math.ceil(displayViewport.width)}px`;
+          inner.style.paddingTop = `${innerTopSlop}px`;
+          inner.style.height = `${Math.ceil(displayViewport.height) + innerTopSlop}px`;
 
           const canvas = document.createElement("canvas");
           canvas.className = "block max-w-none";
@@ -531,8 +636,10 @@ const PdfViewerPanelInner = forwardRef<PdfViewerHandle, Props>(function PdfViewe
 
           textLayerDiv.style.overflow = "visible";
 
-          pageBox.appendChild(canvas);
-          pageBox.appendChild(textLayerDiv);
+          inner.appendChild(canvas);
+          inner.appendChild(textLayerDiv);
+          pageBox.appendChild(inner);
+          pageBox.style.height = `${Math.ceil(displayViewport.height) + pageTopSlop + innerTopSlop}px`;
           pageWrap.appendChild(pageBox);
           host.appendChild(pageWrap);
 

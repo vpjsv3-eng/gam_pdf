@@ -127,7 +127,19 @@ function detectSectionKey(pageText: string): DetectKind {
   if (
     n.includes("건축물대장총괄표제부") ||
     n.includes("일반건축물대장") ||
-    n.includes("집합건축물대장")
+    n.includes("집합건축물대장") ||
+    /** 헤더가 짧거나 OCR·띄어쓰기로 상위 문구만 남은 대장 페이지 */
+    (n.includes("건축물대장") &&
+      (n.includes("대지면적") ||
+        n.includes("연면적") ||
+        n.includes("건폐율") ||
+        n.includes("용적률") ||
+        n.includes("주구조") ||
+        n.includes("건축면적") ||
+        n.includes("층수") ||
+        n.includes("호수") ||
+        n.includes("전유부") ||
+        n.includes("표제부")))
   ) {
     return "building_registry";
   }

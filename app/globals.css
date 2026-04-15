@@ -25,3 +25,7 @@ body {
 .pdf-inline-view-root .textLayer {
   overflow: visible !important;
 }
+
+.pdf-inline-view-root .textLayer :is(span, br) {
+  overflow: visible !important;
+}

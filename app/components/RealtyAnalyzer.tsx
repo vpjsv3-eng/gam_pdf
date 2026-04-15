@@ -27,7 +27,7 @@ import {
   LAND_USE_PLAN_SECTION_KEY,
   type PdfSectionRange,
 } from "@/lib/pdfSectionPages";
-import { getJibunSearchText } from "@/lib/pdfSearchNormalize";
+import { getJibunSearchText, sourceRowHighlightQuery } from "@/lib/pdfSearchNormalize";
 
 function isPdfSectionTabKey(k: string): boolean {
   return (
@@ -123,17 +123,8 @@ function DetailRow({
   anchor?: string;
 }) {
   const v = value.trim();
-  const isFloorLabel = label === "층수" || label.includes("층수");
   const highlightQuery =
-    label === "지분현황"
-      ? getJibunSearchText(v)
-      : isFloorLabel
-        ? v.match(/\d+층/)?.[0] ??
-          (() => {
-            const digits = v.replace(/[^0-9]/g, "");
-            return digits.length > 0 ? `${digits}층` : undefined;
-          })()
-        : undefined;
+    label === "지분현황" ? getJibunSearchText(v) : sourceRowHighlightQuery(label, v);
   return (
     <div className="grid grid-cols-[minmax(8rem,11rem)_1fr] gap-3 border-b border-zinc-100 py-2.5 text-sm last:border-0">
       <div className="shrink-0 text-zinc-500">{label}</div>
@@ -152,49 +143,38 @@ function DetailRow({
   );
 }
 
-/** 건축물대장 탭: 텍스트 검색 대신 대장 구간 첫 페이지로만 이동 */
-function RegistrySectionSourceLink({
-  fileCount,
-  onScrollToRegistryPdfSection,
-  hasValue,
-}: {
-  fileCount: number;
-  onScrollToRegistryPdfSection: () => void;
-  hasValue: boolean;
-}) {
-  if (fileCount <= 0 || !hasValue) return null;
-  return (
-    <button
-      type="button"
-      onClick={onScrollToRegistryPdfSection}
-      className="shrink-0 text-xs text-sky-600 underline-offset-2 hover:underline"
-    >
-      🔍 원본
-    </button>
-  );
-}
-
 function RegistryDetailRow({
   label,
   value,
   fileCount,
-  onScrollToRegistryPdfSection,
+  onGoToSource,
+  anchor,
 }: {
   label: string;
   value: string;
   fileCount: number;
-  onScrollToRegistryPdfSection: () => void;
+  onGoToSource: (
+    fileIndex: number,
+    highlightText: string,
+    sectionKey: string,
+    anchor?: string,
+  ) => void;
+  anchor?: string;
 }) {
   const v = value.trim();
+  const highlightQuery = sourceRowHighlightQuery(label, v);
   return (
     <div className="grid grid-cols-[minmax(8rem,11rem)_1fr] gap-3 border-b border-zinc-100 py-2.5 text-sm last:border-0">
       <div className="shrink-0 text-zinc-500">{label}</div>
       <div className="flex min-w-0 flex-wrap items-start gap-x-2 gap-y-1">
         <span className="min-w-0 break-words text-zinc-900">{v || "—"}</span>
-        <RegistrySectionSourceLink
+        <SourceLink
           fileCount={fileCount}
-          onScrollToRegistryPdfSection={onScrollToRegistryPdfSection}
-          hasValue={Boolean(v)}
+          onGoTo={onGoToSource}
+          text={v}
+          sectionKey="건축물대장"
+          anchor={anchor}
+          highlightQuery={highlightQuery}
         />
       </div>
     </div>
@@ -378,14 +358,20 @@ const RegistryParcelPanel = memo(function RegistryParcelPanel({
 function BuildingRegistryPanel({
   br,
   fileCount,
-  onScrollToRegistryPdfSection,
+  onGoToSource,
 }: {
   br: NonNullable<AnalysisResult["building_registry"]>;
   fileCount: number;
-  onScrollToRegistryPdfSection: () => void;
+  onGoToSource: (
+    fileIndex: number,
+    highlightText: string,
+    sectionKey: string,
+    anchor?: string,
+  ) => void;
 }) {
   const skip = new Set(["동별내역", "변동사항"]);
   const rows = Object.entries(br).filter(([k]) => !skip.has(k));
+  const brRec = br as unknown as Record<string, unknown>;
 
   return (
     <div className="space-y-6">
@@ -399,7 +385,8 @@ function BuildingRegistryPanel({
             label={k}
             value={v === null || v === undefined ? "" : String(v)}
             fileCount={fileCount}
-            onScrollToRegistryPdfSection={onScrollToRegistryPdfSection}
+            onGoToSource={onGoToSource}
+            anchor={fieldAnchor(brRec, k)}
           />
         ))}
       </div>
@@ -420,18 +407,25 @@ function BuildingRegistryPanel({
               <tbody>
                 {br.동별내역!.map((row, i) => (
                   <tr key={i} className="border-b border-zinc-100">
-                    {Object.values(row).map((cell, j) => (
-                      <td key={j} className="py-2 pr-2 align-top">
-                        <div className="flex flex-wrap gap-1">
-                          <span>{String(cell ?? "")}</span>
-                          <RegistrySectionSourceLink
-                            fileCount={fileCount}
-                            onScrollToRegistryPdfSection={onScrollToRegistryPdfSection}
-                            hasValue={Boolean(String(cell ?? "").trim())}
-                          />
-                        </div>
-                      </td>
-                    ))}
+                    {Object.entries(row).map(([colKey, cell]) => {
+                      const cellText = String(cell ?? "").trim();
+                      return (
+                        <td key={colKey} className="py-2 pr-2 align-top">
+                          <div className="flex flex-wrap gap-1">
+                            <span>{cellText}</span>
+                            {cellText ? (
+                              <SourceLink
+                                fileCount={fileCount}
+                                onGoTo={onGoToSource}
+                                text={cellText}
+                                sectionKey="건축물대장"
+                                highlightQuery={sourceRowHighlightQuery(colKey, cellText)}
+                              />
+                            ) : null}
+                          </div>
+                        </td>
+                      );
+                    })}
                   </tr>
                 ))}
               </tbody>
@@ -565,10 +559,6 @@ export default function RealtyAnalyzer() {
     },
     [],
   );
-
-  const scrollToBuildingRegistryPdfSection = useCallback(() => {
-    pdfRef.current?.scrollToBuildingRegistrySection(0);
-  }, []);
 
   const reset = useCallback(() => {
     setFiles([]);
@@ -1104,7 +1094,7 @@ export default function RealtyAnalyzer() {
                           <BuildingRegistryPanelMemo
                             br={result.building_registry}
                             fileCount={fileCount}
-                            onScrollToRegistryPdfSection={scrollToBuildingRegistryPdfSection}
+                            onGoToSource={goToSourceText}
                           />
                         ) : (
                           <p className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
@@ -1189,7 +1179,7 @@ export default function RealtyAnalyzer() {
                         <BuildingRegistryPanelMemo
                           br={result.building_registry}
                           fileCount={fileCount}
-                          onScrollToRegistryPdfSection={scrollToBuildingRegistryPdfSection}
+                          onGoToSource={goToSourceText}
                         />
                       );
                     }
