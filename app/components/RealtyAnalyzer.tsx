@@ -745,7 +745,8 @@ export default function RealtyAnalyzer() {
   }, []);
 
   const parcels = result?.parcels ?? [];
-  const showLandUsePlanTab = pdfSectionKeys.includes(LAND_USE_PLAN_SECTION_KEY);
+  const showLandUsePlanTab =
+    pdfSectionKeys.includes(LAND_USE_PLAN_SECTION_KEY) || !!result?.land_use_plan;
   const showLandRegisterTab = pdfSectionKeys.includes(LAND_REGISTER_SECTION_KEY);
   const showJointOwnershipTab = pdfSectionKeys.includes(JOINT_OWNERSHIP_SECTION_KEY);
   const showCadastralTab = pdfSectionKeys.includes(CADASTRAL_MAP_SECTION_KEY);

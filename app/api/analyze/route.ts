@@ -145,6 +145,15 @@ export async function POST(request: Request) {
       }
     }
 
+    console.log(
+      "[analyze 응답] building_registry:",
+      JSON.stringify((responseBody as Record<string, unknown>)?.building_registry ?? null),
+    );
+    console.log(
+      "[analyze 응답] land_use_plan:",
+      JSON.stringify((responseBody as Record<string, unknown>)?.land_use_plan ?? null),
+    );
+
     return NextResponse.json(responseBody);
   } catch (e) {
     const message = e instanceof Error ? e.message : "알 수 없는 오류";
