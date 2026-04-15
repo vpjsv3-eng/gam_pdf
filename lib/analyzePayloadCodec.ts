@@ -11,6 +11,8 @@ export type AnalyzePostBody = {
   pdfTextGzipBase64?: string;
   /** data URL 접두사 없는 PNG base64 (지적도 섹션 렌더) */
   cadastralMapPngBase64?: string;
+  /** data URL 접두사 없는 PNG base64 (건축물대장 섹션 렌더) */
+  buildingRegistryPngBase64?: string;
 };
 
 export function decodeAnalyzePdfText(body: AnalyzePostBody): string {

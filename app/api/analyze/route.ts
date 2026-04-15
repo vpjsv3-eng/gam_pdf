@@ -46,6 +46,17 @@ export async function POST(request: Request) {
     );
   }
 
+  const buildingRegistryB64 =
+    typeof body.buildingRegistryPngBase64 === "string"
+      ? body.buildingRegistryPngBase64.trim()
+      : "";
+  if (buildingRegistryB64.length > 14_000_000) {
+    return NextResponse.json(
+      { error: "건축물대장 이미지(base64)가 너무 큽니다. 페이지 수를 줄여 주세요." },
+      { status: 400 },
+    );
+  }
+
   if (!pdfText) {
     return NextResponse.json(
       { error: "pdfText·text·pdfTextGzipBase64 중 하나에 추출된 PDF 텍스트를 넣어 주세요." },
@@ -142,6 +153,64 @@ export async function POST(request: Request) {
         }
       } catch {
         /* 지적도 vision 실패 시 텍스트 분석 결과만 유지 */
+      }
+    }
+
+    if (
+      buildingRegistryB64.length > 0 &&
+      responseBody &&
+      typeof responseBody === "object" &&
+      !Array.isArray(responseBody)
+    ) {
+      try {
+        const brVision = await openai.chat.completions.create({
+          model: "gpt-4o",
+          messages: [
+            {
+              role: "user",
+              content: [
+                {
+                  type: "image_url",
+                  image_url: {
+                    url: `data:image/png;base64,${buildingRegistryB64}`,
+                    detail: "high",
+                  },
+                },
+                {
+                  type: "text",
+                  text: `이 이미지는 건축물대장(총괄표제부 또는 일반건축물대장)입니다.
+아래 JSON 형식으로만 답하세요. JSON 외 설명 없이 순수 JSON만 반환하세요.
+
+{
+  "대지면적": "숫자+단위 또는 null",
+  "총연면적": "숫자+단위 또는 null",
+  "건폐율": "퍼센트 또는 null",
+  "용적률": "퍼센트 또는 null",
+  "주용도": "문자열 또는 null",
+  "주구조": "문자열 또는 null",
+  "층수": "문자열 또는 null",
+  "위반건축물": "해당없음 또는 해당 또는 null",
+  "사용승인일": "날짜 또는 null",
+  "동별내역": []
+}`,
+                },
+              ],
+            },
+          ],
+          max_tokens: 1000,
+          response_format: { type: "json_object" },
+          temperature: 0.1,
+        });
+        const brRaw = brVision.choices[0]?.message?.content?.trim();
+        if (brRaw) {
+          const brParsed = JSON.parse(brRaw) as Record<string, unknown>;
+          responseBody = {
+            ...(responseBody as Record<string, unknown>),
+            building_registry: brParsed,
+          };
+        }
+      } catch {
+        /* 건축물대장 vision 실패 시 기존 결과 유지 */
       }
     }
 

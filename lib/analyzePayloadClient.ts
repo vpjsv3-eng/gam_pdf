@@ -11,6 +11,7 @@ function uint8ToBase64(bytes: Uint8Array): string {
 
 export type BuildAnalyzeRequestOptions = {
   cadastralMapPngBase64?: string | null;
+  buildingRegistryPngBase64?: string | null;
 };
 
 /** 분석 API용 JSON 문자열. gzip으로 본문 크기를 줄여 Vercel 요청 한도 완화 */
@@ -22,7 +23,12 @@ export async function buildAnalyzeRequestJson(
     opts?.cadastralMapPngBase64 && opts.cadastralMapPngBase64.length > 0
       ? opts.cadastralMapPngBase64
       : undefined;
-  const extra = cadastral ? { cadastralMapPngBase64: cadastral } : {};
+  const extra = {
+    ...(cadastral ? { cadastralMapPngBase64: cadastral } : {}),
+    ...(opts?.buildingRegistryPngBase64
+      ? { buildingRegistryPngBase64: opts.buildingRegistryPngBase64 }
+      : {}),
+  };
   if (typeof CompressionStream === "undefined") {
     return JSON.stringify({ pdfText, ...extra });
   }

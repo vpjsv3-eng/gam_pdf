@@ -649,7 +649,10 @@ export default function RealtyAnalyzer() {
   const analyze = useCallback(
     async (
       pdfText: string,
-      opts?: { cadastralMapPngBase64?: string | null },
+      opts?: {
+        cadastralMapPngBase64?: string | null;
+        buildingRegistryPngBase64?: string | null;
+      },
     ): Promise<AnalysisResult | null> => {
     setLoading(true);
     setError(null);
@@ -714,9 +717,21 @@ export default function RealtyAnalyzer() {
         cadastralB64 = cadPreview.slice("data:image/png;base64,".length);
       }
     }
+
+    let buildingRegistryB64: string | undefined;
+    if (keys.includes("건축물대장") && pdfRef.current) {
+      const brPreview = await pdfRef.current.exportSectionPngDataUrl("건축물대장");
+      if (brPreview?.startsWith("data:image/png;base64,")) {
+        buildingRegistryB64 = brPreview.slice("data:image/png;base64,".length);
+      }
+    }
+
     setCadastralMapImageUrl(cadPreview);
 
-    const parsed = await analyze(merged, { cadastralMapPngBase64: cadastralB64 });
+    const parsed = await analyze(merged, {
+      cadastralMapPngBase64: cadastralB64,
+      buildingRegistryPngBase64: buildingRegistryB64,
+    });
     if (parsed) {
       saveAnalysisToStorage(parsed, f.name);
       setSavedAnalysesNonce((n) => n + 1);
