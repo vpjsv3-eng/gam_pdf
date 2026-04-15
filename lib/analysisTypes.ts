@@ -76,11 +76,15 @@ export type BuildingRegistryBlock = {
   총연면적?: string | null;
   건폐율?: string | null;
   용적률?: string | null;
+  주용도?: string | null;
+  주구조?: string | null;
+  층수?: string | null;
   용도지역?: string | null;
   위반건축물?: string | null;
   사용승인일?: string | null;
   동별내역?: 동별내역행[] | null;
   변동사항?: string[] | null;
+  [key: string]: unknown;
 };
 
 export type AnalysisSummaryBlock = {

@@ -170,8 +170,13 @@ export function safeParseAnalysisResult(raw: unknown): AnalysisResult | null {
           ? (rawCm as CadastralMapBlock)
           : null;
   }
+  const buildings = (o as { buildings?: unknown }).buildings;
+  const allParcels = [
+    ...(o.parcels as RegistryParcel[]),
+    ...(Array.isArray(buildings) ? (buildings as RegistryParcel[]) : []),
+  ];
   return {
-    parcels: o.parcels as RegistryParcel[],
+    parcels: allParcels,
     building_registry:
       br && typeof br === "object" ? (br as AnalysisResult["building_registry"]) : null,
     land_use_plan,

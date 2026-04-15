@@ -101,7 +101,12 @@ function detectSectionKey(pageText: string): DetectKind {
   if (n.includes("공유지연명부")) return "IGNORE";
   if (n.includes("토지대장") && !n.includes("건축물")) return "IGNORE";
 
-  if (n.includes("토지이용계획확인서")) return "land_use_plan";
+  const 토지이용계획보조키워드 =
+    n.includes("국토의계획및이용에관한법률") ||
+    n.includes("토지이용계획확인서") ||
+    (n.includes("토지이용계획") && n.includes("용도지역"));
+
+  if (토지이용계획보조키워드) return "land_use_plan";
 
   if (
     n.includes("건축물대장총괄표제부") ||
