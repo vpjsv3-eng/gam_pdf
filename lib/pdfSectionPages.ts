@@ -49,7 +49,10 @@ function isNewSectionStart(pageText: string, normalized: string): boolean {
   const has등기사항 = normalized.includes("등기사항전부증명서");
   const has1ofN =
     /1\/\d+/.test(pageText) || /1\s*\/\s*\d+/.test(pageText) || /1\/\d+/.test(normalized);
-  const has토지이용계획확인서 = normalized.includes("토지이용계획확인서");
+  const has토지이용계획확인서 =
+    normalized.includes("토지이용계획확인서") ||
+    normalized.includes("토지이용계획확") ||
+    (normalized.includes("신청토지") && normalized.includes("소재지") && normalized.includes("지목"));
   const has건축물대장키워드 = normalized.includes("건축물대장");
   const 결과 = has등기사항 || has1ofN || has토지이용계획확인서 || has건축물대장키워드;
 
@@ -77,12 +80,26 @@ function detectSectionKey(pageText: string): DetectKind {
   const n = normalizeForDetection(pageText);
   const isNew = isNewSectionStart(pageText, n);
 
+  // 토지이용계획확인서: 정상 키워드 + 폰트 깨짐 대응 보조 키워드
+  const is토지이용계획 =
+    n.includes("토지이용계획확인서") ||
+    n.includes("토지이용계획확") ||
+    n.includes("국토의계획및이용에관한법률") ||
+    (n.includes("토지이용계획") && n.includes("지역·지구등")) ||
+    (n.includes("신청토지") &&
+      n.includes("소재지") &&
+      n.includes("지번") &&
+      n.includes("지목") &&
+      n.includes("면적")) ||
+    n.includes("지구등지정여부") ||
+    n.includes("지역·지구등지정여부");
+
   const checks = {
     주요등기사항요약: n.includes("주요등기사항요약"),
     지적도등본: n.includes("지적도등본"),
     공유지연명부: n.includes("공유지연명부"),
     토지대장무건축물: n.includes("토지대장") && !n.includes("건축물"),
-    토지이용계획확인서: n.includes("토지이용계획확인서"),
+    토지이용계획: is토지이용계획,
     건물헤더: n.includes("[건물]"),
     건물제출용: n.includes("-건물[제출용]-") || n.includes("건물[제출용]"),
     등기사항전부증명서: n.includes("등기사항전부증명서"),
@@ -101,12 +118,7 @@ function detectSectionKey(pageText: string): DetectKind {
   if (n.includes("공유지연명부")) return "IGNORE";
   if (n.includes("토지대장") && !n.includes("건축물")) return "IGNORE";
 
-  const 토지이용계획보조키워드 =
-    n.includes("토지이용계획확인서") ||
-    n.includes("국토의계획및이용에관한법률") ||
-    (n.includes("토지이용계획") && n.includes("용도지역"));
-
-  if (토지이용계획보조키워드) return "land_use_plan";
+  if (is토지이용계획) return "land_use_plan";
 
   if (
     n.includes("건축물대장총괄표제부") ||

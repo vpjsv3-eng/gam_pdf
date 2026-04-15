@@ -123,7 +123,16 @@ function DetailRow({
   anchor?: string;
 }) {
   const v = value.trim();
-  const highlightQuery = label === "지분현황" ? getJibunSearchText(v) : undefined;
+  const highlightQuery =
+    label === "지분현황"
+      ? getJibunSearchText(v)
+      : label === "층수"
+        ? v.match(/\d+층/)?.[0] ??
+          (() => {
+            const digits = v.replace(/[^0-9]/g, "");
+            return digits.length > 0 ? `${digits}층` : undefined;
+          })()
+        : undefined;
   return (
     <div className="grid grid-cols-[minmax(8rem,11rem)_1fr] gap-3 border-b border-zinc-100 py-2.5 text-sm last:border-0">
       <div className="shrink-0 text-zinc-500">{label}</div>
@@ -652,6 +661,7 @@ export default function RealtyAnalyzer() {
       opts?: {
         cadastralMapPngBase64?: string | null;
         buildingRegistryPngBase64?: string | null;
+        landUsePlanPngBase64?: string | null;
       },
     ): Promise<AnalysisResult | null> => {
     setLoading(true);
@@ -718,6 +728,16 @@ export default function RealtyAnalyzer() {
       }
     }
 
+    // 토지이용계획확인서 → 텍스트 깨짐 우회: 항상 vision으로 추출
+    let landUsePlanB64: string | undefined;
+    if (keys.includes(LAND_USE_PLAN_SECTION_KEY) && pdfRef.current) {
+      const lupPreview = await pdfRef.current.exportSectionPngDataUrl(LAND_USE_PLAN_SECTION_KEY);
+      if (lupPreview?.startsWith("data:image/png;base64,")) {
+        landUsePlanB64 = lupPreview.slice("data:image/png;base64,".length);
+      }
+    }
+
+    // 건축물대장 → 이미지 스캔이므로 vision으로 추출
     let buildingRegistryB64: string | undefined;
     if (keys.includes("건축물대장") && pdfRef.current) {
       const brPreview = await pdfRef.current.exportSectionPngDataUrl("건축물대장");
@@ -731,6 +751,7 @@ export default function RealtyAnalyzer() {
     const parsed = await analyze(merged, {
       cadastralMapPngBase64: cadastralB64,
       buildingRegistryPngBase64: buildingRegistryB64,
+      landUsePlanPngBase64: landUsePlanB64,
     });
     if (parsed) {
       saveAnalysisToStorage(parsed, f.name);

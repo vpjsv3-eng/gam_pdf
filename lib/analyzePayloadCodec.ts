@@ -13,6 +13,8 @@ export type AnalyzePostBody = {
   cadastralMapPngBase64?: string;
   /** data URL 접두사 없는 PNG base64 (건축물대장 섹션 렌더) */
   buildingRegistryPngBase64?: string;
+  /** data URL 접두사 없는 PNG base64 (토지이용계획확인서 섹션 렌더) */
+  landUsePlanPngBase64?: string;
 };
 
 export function decodeAnalyzePdfText(body: AnalyzePostBody): string {

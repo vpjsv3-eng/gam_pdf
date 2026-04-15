@@ -57,6 +57,15 @@ export async function POST(request: Request) {
     );
   }
 
+  const landUsePlanB64 =
+    typeof body.landUsePlanPngBase64 === "string" ? body.landUsePlanPngBase64.trim() : "";
+  if (landUsePlanB64.length > 14_000_000) {
+    return NextResponse.json(
+      { error: "토지이용계획 이미지(base64)가 너무 큽니다. 페이지 수를 줄여 주세요." },
+      { status: 400 },
+    );
+  }
+
   if (!pdfText) {
     return NextResponse.json(
       { error: "pdfText·text·pdfTextGzipBase64 중 하나에 추출된 PDF 텍스트를 넣어 주세요." },
@@ -156,31 +165,32 @@ export async function POST(request: Request) {
       }
     }
 
+    // ── 건축물대장 vision (텍스트 추출 없을 때만) ──
     if (
       buildingRegistryB64.length > 0 &&
       responseBody &&
       typeof responseBody === "object" &&
       !Array.isArray(responseBody)
     ) {
-      try {
-        const brVision = await openai.chat.completions.create({
-          model: "gpt-4o",
-          messages: [
-            {
-              role: "user",
-              content: [
-                {
-                  type: "image_url",
-                  image_url: {
-                    url: `data:image/png;base64,${buildingRegistryB64}`,
-                    detail: "high",
+      const existingBr = (responseBody as Record<string, unknown>).building_registry;
+      if (!existingBr) {
+        try {
+          const brVision = await openai.chat.completions.create({
+            model: "gpt-4o",
+            messages: [
+              {
+                role: "user",
+                content: [
+                  {
+                    type: "image_url",
+                    image_url: {
+                      url: `data:image/png;base64,${buildingRegistryB64}`,
+                      detail: "high",
+                    },
                   },
-                },
-                {
-                  type: "text",
-                  text: `이 이미지는 건축물대장(총괄표제부 또는 일반건축물대장)입니다.
-아래 JSON 형식으로만 답하세요. JSON 외 설명 없이 순수 JSON만 반환하세요.
-
+                  {
+                    type: "text",
+                    text: `이 이미지는 일반건축물대장입니다. 아래 JSON만 반환하세요.
 {
   "대지면적": "숫자+단위 또는 null",
   "총연면적": "숫자+단위 또는 null",
@@ -193,24 +203,81 @@ export async function POST(request: Request) {
   "사용승인일": "날짜 또는 null",
   "동별내역": []
 }`,
-                },
-              ],
-            },
-          ],
-          max_tokens: 1000,
-          response_format: { type: "json_object" },
-          temperature: 0.1,
-        });
-        const brRaw = brVision.choices[0]?.message?.content?.trim();
-        if (brRaw) {
-          const brParsed = JSON.parse(brRaw) as Record<string, unknown>;
-          responseBody = {
-            ...(responseBody as Record<string, unknown>),
-            building_registry: brParsed,
-          };
+                  },
+                ],
+              },
+            ],
+            max_tokens: 1000,
+            response_format: { type: "json_object" },
+            temperature: 0.1,
+          });
+          const brRaw = brVision.choices[0]?.message?.content?.trim();
+          if (brRaw) {
+            responseBody = {
+              ...(responseBody as Record<string, unknown>),
+              building_registry: JSON.parse(brRaw) as Record<string, unknown>,
+            };
+          }
+        } catch {
+          /* 실패 시 유지 */
         }
-      } catch {
-        /* 건축물대장 vision 실패 시 기존 결과 유지 */
+      }
+    }
+
+    // ── 토지이용계획확인서 vision (텍스트 추출 없을 때만) ──
+    if (
+      landUsePlanB64.length > 0 &&
+      responseBody &&
+      typeof responseBody === "object" &&
+      !Array.isArray(responseBody)
+    ) {
+      const existingLup = (responseBody as Record<string, unknown>).land_use_plan;
+      if (!existingLup) {
+        try {
+          const lupVision = await openai.chat.completions.create({
+            model: "gpt-4o",
+            messages: [
+              {
+                role: "user",
+                content: [
+                  {
+                    type: "image_url",
+                    image_url: {
+                      url: `data:image/png;base64,${landUsePlanB64}`,
+                      detail: "high",
+                    },
+                  },
+                  {
+                    type: "text",
+                    text: `이 이미지는 토지이용계획확인서입니다.
+'국토의 계획 및 이용에 관한 법률에 따른 지역·지구 등' 항목만 추출하세요.
+다른 법령 항목은 추출하지 마세요. 아래 JSON만 반환하세요.
+{
+  "소재지": "문자열 또는 null",
+  "지번": "문자열 또는 null",
+  "지목": "문자열 또는 null",
+  "면적": "숫자+단위 또는 null",
+  "국토계획법_용도지역": "문자열 또는 null",
+  "지구단위계획구역_여부": true 또는 false
+}`,
+                  },
+                ],
+              },
+            ],
+            max_tokens: 500,
+            response_format: { type: "json_object" },
+            temperature: 0.1,
+          });
+          const lupRaw = lupVision.choices[0]?.message?.content?.trim();
+          if (lupRaw) {
+            responseBody = {
+              ...(responseBody as Record<string, unknown>),
+              land_use_plan: JSON.parse(lupRaw) as Record<string, unknown>,
+            };
+          }
+        } catch {
+          /* 실패 시 유지 */
+        }
       }
     }
 
