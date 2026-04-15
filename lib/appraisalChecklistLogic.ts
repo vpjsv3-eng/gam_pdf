@@ -281,12 +281,10 @@ export const MANUAL_CHECKLIST_ITEMS: { id: string; label: string }[] = [
   { id: "m1", label: "세움터 도면신청 / 전례요청" },
   { id: "m2", label: "현장조사 일정 약속 (임대차확인서, 매매계약서, 내부사진)" },
   { id: "m3", label: "전례 있는 경우 제시외 건물 / 위반건축물 추가 확인" },
-  { id: "m4", label: "사례 / 선례 찾기" },
   { id: "m5", label: "지적도상 맹지 여부 및 출입 가능성 확인" },
   { id: "m6", label: "제시외 건물 존재 여부 (현장 확인)" },
   { id: "m7", label: "도시철도 저촉 여부 (토지이음 확인)" },
   { id: "m8", label: "공부와 현황 불일치 여부 (현장 확인)" },
-  { id: "m9", label: "통합 및 답스 의견서 작성" },
 ];
 
 export function manualChecklistStorageKey(fileKey: string): string {

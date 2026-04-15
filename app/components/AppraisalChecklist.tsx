@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useState } from "react";
 import type { AnalysisResult } from "@/lib/analysisTypes";
 import {
   MANUAL_CHECKLIST_ITEMS,
@@ -29,7 +29,7 @@ type Props = {
   fileKey: string;
 };
 
-export default function AppraisalChecklist({ result, fileKey }: Props) {
+function AppraisalChecklistInner({ result, fileKey }: Props) {
   const storageKey = useMemo(() => manualChecklistStorageKey(fileKey), [fileKey]);
   const [manual, setManual] = useState<Record<string, boolean>>({});
 
@@ -123,3 +123,6 @@ export default function AppraisalChecklist({ result, fileKey }: Props) {
     </section>
   );
 }
+
+const AppraisalChecklist = memo(AppraisalChecklistInner);
+export default AppraisalChecklist;

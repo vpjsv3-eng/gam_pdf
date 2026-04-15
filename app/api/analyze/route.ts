@@ -1,7 +1,9 @@
 import OpenAI from "openai";
 import { NextResponse } from "next/server";
+import { CADASTRAL_VISION_USER_TEXT } from "@/lib/cadastralVisionPrompt";
 import { ANALYSIS_SYSTEM_PROMPT } from "@/lib/systemPrompt";
 import { ensureOpenAiEnv } from "@/lib/loadLocalEnv";
+import { decodeAnalyzePdfText, type AnalyzePostBody } from "@/lib/analyzePayloadCodec";
 
 export const runtime = "nodejs";
 export const maxDuration = 120;
@@ -18,17 +20,35 @@ export async function POST(request: Request) {
 
   const openai = new OpenAI({ apiKey });
 
-  let body: { pdfText?: string; text?: string };
+  let body: AnalyzePostBody;
   try {
     body = await request.json();
   } catch {
     return NextResponse.json({ error: "잘못된 JSON 본문입니다." }, { status: 400 });
   }
 
-  const pdfText = (body.pdfText ?? body.text ?? "").trim();
+  let pdfText: string;
+  try {
+    pdfText = decodeAnalyzePdfText(body);
+  } catch {
+    return NextResponse.json(
+      { error: "압축된 본문(pdfTextGzipBase64)을 해제할 수 없습니다." },
+      { status: 400 },
+    );
+  }
+
+  const cadastralB64 =
+    typeof body.cadastralMapPngBase64 === "string" ? body.cadastralMapPngBase64.trim() : "";
+  if (cadastralB64.length > 14_000_000) {
+    return NextResponse.json(
+      { error: "지적도 이미지(base64)가 너무 큽니다. 페이지 수를 줄여 주세요." },
+      { status: 400 },
+    );
+  }
+
   if (!pdfText) {
     return NextResponse.json(
-      { error: "pdfText(또는 text) 필드에 추출된 PDF 텍스트를 넣어 주세요." },
+      { error: "pdfText·text·pdfTextGzipBase64 중 하나에 추출된 PDF 텍스트를 넣어 주세요." },
       { status: 400 },
     );
   }
@@ -86,7 +106,46 @@ export async function POST(request: Request) {
       }
     }
 
-    return NextResponse.json(parsed);
+    let responseBody: unknown = parsed;
+    if (
+      cadastralB64.length > 0 &&
+      parsed &&
+      typeof parsed === "object" &&
+      !Array.isArray(parsed)
+    ) {
+      try {
+        const vision = await openai.chat.completions.create({
+          model: "gpt-4o",
+          messages: [
+            {
+              role: "user",
+              content: [
+                {
+                  type: "image_url",
+                  image_url: {
+                    url: `data:image/png;base64,${cadastralB64}`,
+                    detail: "high",
+                  },
+                },
+                { type: "text", text: CADASTRAL_VISION_USER_TEXT },
+              ],
+            },
+          ],
+          max_tokens: 500,
+          response_format: { type: "json_object" },
+          temperature: 0.1,
+        });
+        const vraw = vision.choices[0]?.message?.content?.trim();
+        if (vraw) {
+          const vparsed = JSON.parse(vraw) as Record<string, unknown>;
+          responseBody = { ...(parsed as Record<string, unknown>), cadastral_map: vparsed };
+        }
+      } catch {
+        /* 지적도 vision 실패 시 텍스트 분석 결과만 유지 */
+      }
+    }
+
+    return NextResponse.json(responseBody);
   } catch (e) {
     const message = e instanceof Error ? e.message : "알 수 없는 오류";
     return NextResponse.json({ error: message }, { status: 500 });

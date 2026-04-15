@@ -14,6 +14,13 @@ if (process.env.VERCEL) {
   loadEnvConfig(projectDir);
 }
 
-const nextConfig: NextConfig = {};
+const nextConfig: NextConfig = {
+  experimental: {
+    serverActions: {
+      bodySizeLimit: "50mb",
+    },
+    proxyClientMaxBodySize: "50mb",
+  },
+};
 
 export default nextConfig;

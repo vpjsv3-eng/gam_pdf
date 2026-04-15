@@ -4,6 +4,7 @@ import "pdfjs-dist/web/pdf_viewer.css";
 
 import {
   forwardRef,
+  memo,
   useCallback,
   useEffect,
   useImperativeHandle,
@@ -17,12 +18,16 @@ import { pdfHighlightDevLog } from "@/lib/pdfHighlightDev";
 import {
   computePdfSectionRanges,
   getBuildingRegistryStartPage,
+  getPageTextForSectionDetection,
   type PdfSectionRange,
+  type PdfVisionSectionHint,
 } from "@/lib/pdfSectionPages";
+import { renderPdfPageToPngDataUrl, requestVisionSectionType } from "@/lib/renderPdfPagePngClient";
 import {
   findNormalizedNeedleRanges,
   findNormalizedValueRanges,
   normalizeText,
+  pdfHighlightQueryFromDisplayValue,
   sortCharRangesByStartDesc,
 } from "@/lib/pdfSearchNormalize";
 import {
@@ -81,6 +86,10 @@ export type PdfViewerHandle = {
   ) => void;
   /** 건축물대장 구간 첫 페이지로만 이동(텍스트 검색·하이라이트 없음) */
   scrollToBuildingRegistrySection: (fileIndex: number) => void;
+  /** 마지막으로 계산된 섹션 키 목록(렌더 전이면 빈 배열) */
+  getDetectedSectionKeys: () => string[];
+  /** 지정 섹션(예: 지적도) 페이지를 합쳐 PNG data URL로보냄. 미렌더·구간 없음이면 null */
+  exportSectionPngDataUrl: (sectionKey: string) => Promise<string | null>;
 };
 
 type PageLayerData = {
@@ -99,9 +108,11 @@ type Props = {
   onDrop: (e: React.DragEvent) => void;
   onFileInputChange: (e: React.ChangeEvent<HTMLInputElement>) => void;
   onTextNotFound?: () => void;
+  /** PDF 섹션 범위 계산 직후(렌더 완료 시) */
+  onSectionRangesComputed?: (ranges: PdfSectionRange[]) => void;
 };
 
-const PdfViewerPanel = forwardRef<PdfViewerHandle, Props>(function PdfViewerPanel(
+const PdfViewerPanelInner = forwardRef<PdfViewerHandle, Props>(function PdfViewerPanel(
   {
     files,
     buffers,
@@ -110,9 +121,12 @@ const PdfViewerPanel = forwardRef<PdfViewerHandle, Props>(function PdfViewerPane
     onDrop,
     onFileInputChange,
     onTextNotFound,
+    onSectionRangesComputed,
   },
   ref,
 ) {
+  const onSectionRangesComputedRef = useRef(onSectionRangesComputed);
+  onSectionRangesComputedRef.current = onSectionRangesComputed;
   const scrollRef = useRef<HTMLDivElement>(null);
   const pagesHostRef = useRef<HTMLDivElement>(null);
   const pageDataRef = useRef<Map<number, PageLayerData>>(new Map());
@@ -182,7 +196,8 @@ const PdfViewerPanel = forwardRef<PdfViewerHandle, Props>(function PdfViewerPane
 
   const executeSearch = useCallback(
     (query: string, sectionKey: string, anchor?: string | null): PdfHighlightSearchResult => {
-      const q = query.trim();
+      const qRaw = query.trim();
+      const q = pdfHighlightQueryFromDisplayValue(qRaw);
       if (q.length < 1) return "miss";
       clearHighlights();
       const sec = sectionRangesRef.current.find((r) => r.sectionKey === sectionKey);
@@ -190,11 +205,13 @@ const PdfViewerPanel = forwardRef<PdfViewerHandle, Props>(function PdfViewerPane
         pdfHighlightDevLog("no section range", { sectionKey, ranges: sectionRangesRef.current });
         return "miss";
       }
-      console.log("원본 검색 섹션 범위:", {
-        sectionKey,
-        startPage: sec.startPage,
-        endPage: sec.endPage,
-      });
+      if (process.env.NODE_ENV === "development") {
+        console.log("원본 검색 섹션 범위:", {
+          sectionKey,
+          startPage: sec.startPage,
+          endPage: sec.endPage,
+        });
+      }
       const anchorTrim = (anchor ?? "").trim();
       const valueNorm = normalizeText(q);
 
@@ -202,6 +219,7 @@ const PdfViewerPanel = forwardRef<PdfViewerHandle, Props>(function PdfViewerPane
         sectionKey,
         pages: [sec.startPage, sec.endPage],
         query: q,
+        queryRaw: qRaw,
         hasAnchor: anchorTrim.length > 0,
         anchorPreview: anchorTrim.slice(0, 48),
       });
@@ -276,6 +294,74 @@ const PdfViewerPanel = forwardRef<PdfViewerHandle, Props>(function PdfViewerPane
     };
     requestAnimationFrame(() => requestAnimationFrame(run));
   }, [pdfDoc, clearHighlights]);
+
+  const exportSectionPngDataUrl = useCallback(
+    async (sectionKey: string): Promise<string | null> => {
+      const doc = pdfDoc;
+      if (!doc || !fullyRenderedRef.current) return null;
+      const sk = sectionKey.trim();
+      const sec = sectionRangesRef.current.find((r) => r.sectionKey === sk);
+      if (!sec) return null;
+
+      const scrollEl = scrollRef.current;
+      const cw = scrollEl?.clientWidth ?? hostWidth;
+      const maxCssW = Math.max(280, (cw > 0 ? cw : 720) - 24);
+      const dpr = Math.min(typeof window !== "undefined" ? window.devicePixelRatio || 1 : 1, 2);
+
+      const canvases: HTMLCanvasElement[] = [];
+      const maxPages = 12;
+      const endPg = Math.min(sec.endPage, sec.startPage + maxPages - 1);
+
+      for (let p = sec.startPage; p <= endPg; p++) {
+        const page = await doc.getPage(p);
+        const base = page.getViewport({ scale: 1 });
+        const cssScale = Math.min(maxCssW / base.width, 2.0);
+        const vp = page.getViewport({ scale: cssScale * dpr });
+        const canvas = document.createElement("canvas");
+        canvas.width = Math.ceil(vp.width);
+        canvas.height = Math.ceil(vp.height);
+        const ctx = canvas.getContext("2d", { alpha: false });
+        if (!ctx) continue;
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = "high";
+        await page.render({ canvasContext: ctx, viewport: vp, canvas, intent: "display" }).promise;
+        canvases.push(canvas);
+      }
+
+      if (canvases.length === 0) return null;
+
+      const tw = Math.max(...canvases.map((c) => c.width));
+      const th = canvases.reduce((s, c) => s + c.height, 0);
+      const out = document.createElement("canvas");
+      out.width = tw;
+      out.height = th;
+      const octx = out.getContext("2d", { alpha: false });
+      if (!octx) return null;
+      let y = 0;
+      for (const c of canvases) {
+        octx.drawImage(c, 0, y);
+        y += c.height;
+      }
+
+      const maxDim = 2800;
+      if (out.width > maxDim || out.height > maxDim) {
+        const s = maxDim / Math.max(out.width, out.height);
+        const sm = document.createElement("canvas");
+        sm.width = Math.floor(out.width * s);
+        sm.height = Math.floor(out.height * s);
+        const sx = sm.getContext("2d", { alpha: false });
+        if (sx) {
+          sx.imageSmoothingEnabled = true;
+          sx.imageSmoothingQuality = "high";
+          sx.drawImage(out, 0, 0, sm.width, sm.height);
+          return sm.toDataURL("image/png");
+        }
+      }
+      return out.toDataURL("image/png");
+    },
+    [pdfDoc, hostWidth],
+  );
 
   const executeSearchRef = useRef(executeSearch);
   executeSearchRef.current = executeSearch;
@@ -375,8 +461,11 @@ const PdfViewerPanel = forwardRef<PdfViewerHandle, Props>(function PdfViewerPane
 
           const pdfPage = await doc.getPage(pageNum);
           const base = pdfPage.getViewport({ scale: 1 });
-          const scale = Math.min(maxW / base.width, 2.5);
-          const viewport = pdfPage.getViewport({ scale });
+          const devicePixelRatio = window.devicePixelRatio || 1;
+          /** 레이아웃·텍스트 레이어용(CSS px). 상한 2.0으로 메모리·품질 균형 */
+          const cssScale = Math.min(maxW / base.width, 2.0);
+          const displayViewport = pdfPage.getViewport({ scale: cssScale });
+          const renderViewport = pdfPage.getViewport({ scale: cssScale * devicePixelRatio });
 
           const pageWrap = document.createElement("div");
           pageWrap.dataset.pageNum = String(pageNum);
@@ -386,22 +475,29 @@ const PdfViewerPanel = forwardRef<PdfViewerHandle, Props>(function PdfViewerPane
 
           const pageBox = document.createElement("div");
           pageBox.className = "relative shadow-md";
-          pageBox.style.width = `${Math.floor(viewport.width)}px`;
-          pageBox.style.height = `${Math.floor(viewport.height)}px`;
-          pageBox.style.setProperty("--total-scale-factor", String(scale));
+          pageBox.style.width = `${Math.ceil(displayViewport.width)}px`;
+          pageBox.style.height = `${Math.ceil(displayViewport.height)}px`;
+          pageBox.style.setProperty("--total-scale-factor", String(cssScale));
 
           const canvas = document.createElement("canvas");
           canvas.className = "block max-w-none";
-          const ctx = canvas.getContext("2d");
-          if (!ctx) continue;
+          const pixelRatio = devicePixelRatio;
+          canvas.width = Math.ceil(renderViewport.width);
+          canvas.height = Math.ceil(renderViewport.height);
+          canvas.style.width = `${Math.ceil(renderViewport.width / pixelRatio)}px`;
+          canvas.style.height = `${Math.ceil(renderViewport.height / pixelRatio)}px`;
 
-          canvas.width = Math.floor(viewport.width);
-          canvas.height = Math.floor(viewport.height);
+          const ctx = canvas.getContext("2d", { alpha: false });
+          if (!ctx) continue;
+          ctx.clearRect(0, 0, canvas.width, canvas.height);
+          ctx.imageSmoothingEnabled = true;
+          ctx.imageSmoothingQuality = "high";
 
           await pdfPage.render({
             canvasContext: ctx,
-            viewport,
+            viewport: renderViewport,
             canvas,
+            intent: "display",
           }).promise;
 
           if (cancelled || gen !== renderGenRef.current) return;
@@ -413,7 +509,7 @@ const PdfViewerPanel = forwardRef<PdfViewerHandle, Props>(function PdfViewerPane
           const textLayer = new TextLayer({
             textContentSource: textContent,
             container: textLayerDiv,
-            viewport,
+            viewport: displayViewport,
           });
           textLayersRef.current.push(textLayer);
           await textLayer.render();
@@ -433,10 +529,34 @@ const PdfViewerPanel = forwardRef<PdfViewerHandle, Props>(function PdfViewerPane
 
         if (cancelled || gen !== renderGenRef.current) return;
 
-        const sectionRanges = computePdfSectionRanges(pageDataRef.current, doc.numPages);
+        const visionHints = new Map<number, PdfVisionSectionHint>();
+        for (let p = 1; p <= doc.numPages; p++) {
+          if (cancelled || gen !== renderGenRef.current) return;
+          const t = getPageTextForSectionDetection(pageDataRef.current.get(p));
+          if (t.trim() !== "") continue;
+          console.log(`[페이지 ${p}] 텍스트 없음 → vision 감지 시도`);
+          try {
+            const dataUrl = await renderPdfPageToPngDataUrl(doc, p);
+            if (!dataUrl) {
+              console.log(`[페이지 ${p}] vision 감지 결과:`, null, "(렌더 실패)");
+              continue;
+            }
+            const hint = await requestVisionSectionType(dataUrl);
+            console.log(`[페이지 ${p}] vision 감지 결과:`, hint);
+            if (hint) visionHints.set(p, hint);
+          } catch {
+            console.log(`[페이지 ${p}] vision 감지 결과:`, null, "(요청 실패)");
+          }
+        }
+
+        if (cancelled || gen !== renderGenRef.current) return;
+
+        const sectionRanges = computePdfSectionRanges(pageDataRef.current, doc.numPages, {
+          visionHints,
+        });
         sectionRangesRef.current = sectionRanges;
-        console.log("섹션 범위:", sectionRanges);
         pdfHighlightDevLog("section ranges computed", sectionRanges);
+        onSectionRangesComputedRef.current?.(sectionRanges);
 
         fullyRenderedRef.current = true;
         setVisiblePage(1);
@@ -549,6 +669,8 @@ const PdfViewerPanel = forwardRef<PdfViewerHandle, Props>(function PdfViewerPane
 
         scrollToBuildingRegistrySectionImpl();
       },
+      getDetectedSectionKeys: () => sectionRangesRef.current.map((r) => r.sectionKey),
+      exportSectionPngDataUrl,
     }),
     [
       files.length,
@@ -559,6 +681,7 @@ const PdfViewerPanel = forwardRef<PdfViewerHandle, Props>(function PdfViewerPane
       executeSearch,
       scrollToBuildingRegistrySectionImpl,
       onTextNotFound,
+      exportSectionPngDataUrl,
     ],
   );
 
@@ -650,4 +773,5 @@ const PdfViewerPanel = forwardRef<PdfViewerHandle, Props>(function PdfViewerPane
   );
 });
 
+const PdfViewerPanel = memo(PdfViewerPanelInner);
 export default PdfViewerPanel;

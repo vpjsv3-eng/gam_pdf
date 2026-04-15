@@ -1,8 +1,12 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { AnalysisResult, RegistryParcel } from "@/lib/analysisTypes";
 import AppraisalChecklist from "@/app/components/AppraisalChecklist";
+import CadastralMapPanel from "@/app/components/CadastralMapPanel";
+import JointOwnershipPanel from "@/app/components/JointOwnershipPanel";
+import LandRegisterPanel from "@/app/components/LandRegisterPanel";
+import LandUsePlanPanel from "@/app/components/LandUsePlanPanel";
 import PdfViewerPanel, { type PdfViewerHandle } from "@/app/components/PdfViewerPanel";
 import SavedAnalysesSection from "@/app/components/SavedAnalysesSection";
 import {
@@ -14,6 +18,51 @@ import { registryParcelTabTitle } from "@/lib/registryTabLabels";
 import { SAMPLE_PDF_TEXT } from "@/lib/sampleText";
 import { saveAnalysisToStorage } from "@/lib/savedAnalysisStorage";
 import { extractTextFromPdfBuffer } from "@/lib/extractPdfText";
+import { buildAnalyzeRequestJson } from "@/lib/analyzePayloadClient";
+import { compareLandUseToFirstLandParcel, firstLandParcel } from "@/lib/landUsePlanCompare";
+import {
+  CADASTRAL_MAP_SECTION_KEY,
+  JOINT_OWNERSHIP_SECTION_KEY,
+  LAND_REGISTER_SECTION_KEY,
+  LAND_USE_PLAN_SECTION_KEY,
+  type PdfSectionRange,
+} from "@/lib/pdfSectionPages";
+import { getJibunSearchText } from "@/lib/pdfSearchNormalize";
+
+function isPdfSectionTabKey(k: string): boolean {
+  return (
+    k.startsWith("토지 ") ||
+    k.startsWith("건물 ") ||
+    k === "건축물대장" ||
+    k === LAND_USE_PLAN_SECTION_KEY ||
+    k === LAND_REGISTER_SECTION_KEY ||
+    k === JOINT_OWNERSHIP_SECTION_KEY ||
+    k === CADASTRAL_MAP_SECTION_KEY
+  );
+}
+
+function pdfTabLabel(sectionKey: string): string {
+  if (sectionKey === LAND_USE_PLAN_SECTION_KEY) return "토지이용계획";
+  if (sectionKey === LAND_REGISTER_SECTION_KEY) return "토지대장";
+  if (sectionKey === JOINT_OWNERSHIP_SECTION_KEY) return "공유지연명부";
+  if (sectionKey === CADASTRAL_MAP_SECTION_KEY) return "지적도";
+  return sectionKey;
+}
+
+function parcelIndexForSectionKey(sectionKey: string, parcels: RegistryParcel[]): number {
+  for (let i = 0; i < parcels.length; i++) {
+    if (registryParcelTabTitle(parcels[i]!, i, parcels) === sectionKey) return i;
+  }
+  return -1;
+}
+
+type LegacySecondaryTab =
+  | { idx: number; kind: "parcel"; parcelIndex: number; label: string }
+  | { idx: number; kind: "building"; label: string }
+  | { idx: number; kind: "land_use"; label: string }
+  | { idx: number; kind: "land_register"; label: string }
+  | { idx: number; kind: "joint"; label: string }
+  | { idx: number; kind: "cadastral"; label: string };
 
 type UploadedFile = {
   id: string;
@@ -34,19 +83,23 @@ function SourceLink({
   text,
   sectionKey,
   anchor,
+  highlightQuery,
 }: {
   fileCount: number;
   onGoTo: (fileIndex: number, highlightText: string, sectionKey: string, anchor?: string) => void;
   text: string;
   sectionKey: string;
   anchor?: string;
+  /** PDF 검색에 쓸 문자열(표시 \`text\`와 다를 때, 예: 지분현황) */
+  highlightQuery?: string;
 }) {
   const t = text.trim();
-  if (fileCount <= 0 || !t) return null;
+  const q = (highlightQuery ?? text).trim();
+  if (fileCount <= 0 || !t || !q) return null;
   return (
     <button
       type="button"
-      onClick={() => onGoTo(0, t, sectionKey, anchor)}
+      onClick={() => onGoTo(0, q, sectionKey, anchor)}
       className="shrink-0 text-xs text-sky-600 underline-offset-2 hover:underline"
     >
       🔍 원본
@@ -70,6 +123,7 @@ function DetailRow({
   anchor?: string;
 }) {
   const v = value.trim();
+  const highlightQuery = label === "지분현황" ? getJibunSearchText(v) : undefined;
   return (
     <div className="grid grid-cols-[minmax(8rem,11rem)_1fr] gap-3 border-b border-zinc-100 py-2.5 text-sm last:border-0">
       <div className="shrink-0 text-zinc-500">{label}</div>
@@ -81,6 +135,7 @@ function DetailRow({
           text={v}
           sectionKey={sectionKey}
           anchor={anchor}
+          highlightQuery={highlightQuery}
         />
       </div>
     </div>
@@ -136,15 +191,17 @@ function RegistryDetailRow({
   );
 }
 
-function RegistryParcelPanel({
+const RegistryParcelPanel = memo(function RegistryParcelPanel({
   parcel,
   parcelIndex,
+  parcels,
   fileCount,
   onGoToSource,
 }: {
   parcel: RegistryParcel;
   /** parcels 배열 기준 0-based — 탭 sectionKey와 동일한 키 계산용 */
   parcelIndex: number;
+  parcels: RegistryParcel[];
   fileCount: number;
   onGoToSource: (
     fileIndex: number,
@@ -157,7 +214,7 @@ function RegistryParcelPanel({
   const o = (parcel.ownership ?? {}) as Record<string, unknown>;
   const r = parcel.rights ?? {};
   const list = r.근저당권 ?? [];
-  const sectionKey = registryParcelTabTitle(parcel, parcelIndex);
+  const sectionKey = registryParcelTabTitle(parcel, parcelIndex, parcels);
 
   return (
     <div className="space-y-8">
@@ -306,7 +363,7 @@ function RegistryParcelPanel({
       </section>
     </div>
   );
-}
+});
 
 function BuildingRegistryPanel({
   br,
@@ -386,10 +443,17 @@ function BuildingRegistryPanel({
   );
 }
 
-function SummaryOverview({ result }: { result: AnalysisResult }) {
+const SummaryOverview = memo(function SummaryOverview({ result }: { result: AnalysisResult }) {
   const sm = result.summary;
   const mark = (v: boolean | null | undefined) =>
     v === true ? "✅" : v === false ? "❌" : "—";
+
+  const land = firstLandParcel(result.parcels);
+  const plan = result.land_use_plan;
+  const landUseCmp = useMemo(
+    () => (plan ? compareLandUseToFirstLandParcel(plan, land) : null),
+    [plan, land],
+  );
 
   return (
     <div className="space-y-4">
@@ -421,9 +485,44 @@ function SummaryOverview({ result }: { result: AnalysisResult }) {
           <p className="mt-1 text-2xl">{mark(sm?.건물등기_연면적_대장_일치)}</p>
         </div>
       </div>
+
+      {plan && (
+        <div className="rounded-lg border border-zinc-200 bg-white p-4 shadow-sm">
+          <p className="text-xs font-medium text-zinc-500">토지이용계획 ↔ 토지등기 (첫 필지)</p>
+          {!land ? (
+            <p className="mt-2 text-sm text-amber-800">토지 등기 필지가 없어 비교할 수 없습니다.</p>
+          ) : landUseCmp ? (
+            <ul className="mt-3 space-y-2 text-sm text-zinc-800">
+              <li className="flex flex-wrap gap-x-2">
+                <span className="font-medium text-zinc-600">소재지·지번 ↔ 등기 주소</span>
+                <span>{mark(landUseCmp.소재지지번_일치)}</span>
+                <span className="text-zinc-500">
+                  이용: {landUseCmp.이용계획_소재지지번} / 등기: {landUseCmp.등기_주소}
+                </span>
+              </li>
+              <li className="flex flex-wrap gap-x-2">
+                <span className="font-medium text-zinc-600">지목</span>
+                <span>{mark(landUseCmp.지목_일치)}</span>
+                <span className="text-zinc-500">
+                  이용: {landUseCmp.이용계획_지목} / 등기: {landUseCmp.등기_지목}
+                </span>
+              </li>
+              <li className="flex flex-wrap gap-x-2">
+                <span className="font-medium text-zinc-600">면적</span>
+                <span>{mark(landUseCmp.면적_일치)}</span>
+                <span className="text-zinc-500">
+                  이용: {landUseCmp.이용계획_면적} / 등기: {landUseCmp.등기_면적}
+                </span>
+              </li>
+            </ul>
+          ) : null}
+        </div>
+      )}
     </div>
   );
-}
+});
+
+const BuildingRegistryPanelMemo = memo(BuildingRegistryPanel);
 
 export default function RealtyAnalyzer() {
   const pdfRef = useRef<PdfViewerHandle>(null);
@@ -437,6 +536,9 @@ export default function RealtyAnalyzer() {
   const [pdfFileIndex, setPdfFileIndex] = useState(0);
   const [sourceToast, setSourceToast] = useState<string | null>(null);
   const [savedAnalysesNonce, setSavedAnalysesNonce] = useState(0);
+  const [pdfSectionKeys, setPdfSectionKeys] = useState<string[]>([]);
+  const [pdfSectionRanges, setPdfSectionRanges] = useState<PdfSectionRange[]>([]);
+  const [cadastralMapImageUrl, setCadastralMapImageUrl] = useState<string | null>(null);
 
   const showSourceTextNotFound = useCallback(() => {
     if (sourceToastTimerRef.current) clearTimeout(sourceToastTimerRef.current);
@@ -466,7 +568,22 @@ export default function RealtyAnalyzer() {
     setMainTab(0);
     setPdfFileIndex(0);
     setLoading(false);
+    setPdfSectionKeys([]);
+    setPdfSectionRanges([]);
+    setCadastralMapImageUrl(null);
   }, []);
+
+  const handlePdfSectionRanges = useCallback((ranges: PdfSectionRange[]) => {
+    setPdfSectionKeys(ranges.map((r) => r.sectionKey));
+    setPdfSectionRanges(ranges);
+  }, []);
+
+  useEffect(() => {
+    if (files.length === 0) {
+      setPdfSectionKeys([]);
+      setPdfSectionRanges([]);
+    }
+  }, [files.length]);
 
   useEffect(() => {
     if (files.length === 0) setPdfFileIndex(0);
@@ -489,6 +606,7 @@ export default function RealtyAnalyzer() {
     }
     setError(null);
     setResult(null);
+    setCadastralMapImageUrl(null);
     const file = arr[0]!;
     void new Promise<{ id: string; name: string; size: number; buffer: ArrayBuffer }>(
       (resolve, reject) => {
@@ -528,15 +646,19 @@ export default function RealtyAnalyzer() {
     [addFiles],
   );
 
-  const analyze = useCallback(async (pdfText: string): Promise<AnalysisResult | null> => {
+  const analyze = useCallback(
+    async (
+      pdfText: string,
+      opts?: { cadastralMapPngBase64?: string | null },
+    ): Promise<AnalysisResult | null> => {
     setLoading(true);
     setError(null);
-    setResult(null);
     try {
+      const body = await buildAnalyzeRequestJson(pdfText, opts);
       const res = await fetch("/api/analyze", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ pdfText }),
+        body,
       });
       const data = await res.json();
       if (!res.ok) {
@@ -576,7 +698,20 @@ export default function RealtyAnalyzer() {
       return;
     }
     const merged = `\n\n--- 파일: ${f.name} ---\n\n${text}`.trim();
-    const parsed = await analyze(merged);
+
+    setCadastralMapImageUrl(null);
+    const keys = pdfRef.current?.getDetectedSectionKeys() ?? [];
+    let cadastralB64: string | undefined;
+    let cadPreview: string | null = null;
+    if (keys.includes(CADASTRAL_MAP_SECTION_KEY) && pdfRef.current) {
+      cadPreview = await pdfRef.current.exportSectionPngDataUrl(CADASTRAL_MAP_SECTION_KEY);
+      if (cadPreview?.startsWith("data:image/png;base64,")) {
+        cadastralB64 = cadPreview.slice("data:image/png;base64,".length);
+      }
+    }
+    setCadastralMapImageUrl(cadPreview);
+
+    const parsed = await analyze(merged, { cadastralMapPngBase64: cadastralB64 });
     if (parsed) {
       saveAnalysisToStorage(parsed, f.name);
       setSavedAnalysesNonce((n) => n + 1);
@@ -584,6 +719,7 @@ export default function RealtyAnalyzer() {
   }, [analyze, buffers, files]);
 
   const runSample = useCallback(async () => {
+    setCadastralMapImageUrl(null);
     const parsed = await analyze(SAMPLE_PDF_TEXT);
     if (parsed) {
       saveAnalysisToStorage(parsed, "샘플 텍스트");
@@ -605,10 +741,110 @@ export default function RealtyAnalyzer() {
     setResult(data);
     setMainTab(0);
     setError(null);
+    setCadastralMapImageUrl(null);
   }, []);
 
   const parcels = result?.parcels ?? [];
-  const buildingTabIndex = result?.building_registry ? 1 + parcels.length : -1;
+  const showLandUsePlanTab = pdfSectionKeys.includes(LAND_USE_PLAN_SECTION_KEY);
+  const showLandRegisterTab = pdfSectionKeys.includes(LAND_REGISTER_SECTION_KEY);
+  const showJointOwnershipTab = pdfSectionKeys.includes(JOINT_OWNERSHIP_SECTION_KEY);
+  const showCadastralTab = pdfSectionKeys.includes(CADASTRAL_MAP_SECTION_KEY);
+
+  const pdfTabOrder = useMemo(
+    () => pdfSectionKeys.filter(isPdfSectionTabKey),
+    [pdfSectionKeys],
+  );
+
+  const lastTabIndex = useMemo(() => {
+    if (pdfTabOrder.length > 0) return pdfTabOrder.length;
+    let cur = 1 + parcels.length;
+    if (result?.building_registry) cur++;
+    if (showLandUsePlanTab) cur++;
+    if (showLandRegisterTab) cur++;
+    if (showJointOwnershipTab) cur++;
+    if (showCadastralTab) cur++;
+    return Math.max(0, cur - 1);
+  }, [
+    pdfTabOrder,
+    parcels.length,
+    result?.building_registry,
+    showLandUsePlanTab,
+    showLandRegisterTab,
+    showJointOwnershipTab,
+    showCadastralTab,
+  ]);
+
+  const legacySecondaryTabs = useMemo((): LegacySecondaryTab[] => {
+    if (pdfTabOrder.length > 0) return [];
+    const out: LegacySecondaryTab[] = [];
+    let idx = 1;
+    parcels.forEach((p, i) => {
+      out.push({
+        idx: idx++,
+        kind: "parcel",
+        parcelIndex: i,
+        label: registryParcelTabTitle(p, i, parcels),
+      });
+    });
+    if (result?.building_registry) {
+      out.push({ idx: idx++, kind: "building", label: "건축물대장" });
+    }
+    if (showLandUsePlanTab) {
+      out.push({ idx: idx++, kind: "land_use", label: "토지이용계획" });
+    }
+    if (showLandRegisterTab) {
+      out.push({ idx: idx++, kind: "land_register", label: "토지대장" });
+    }
+    if (showJointOwnershipTab) {
+      out.push({ idx: idx++, kind: "joint", label: "공유지연명부" });
+    }
+    if (showCadastralTab) {
+      out.push({ idx: idx++, kind: "cadastral", label: "지적도" });
+    }
+    return out;
+  }, [
+    pdfTabOrder.length,
+    parcels,
+    result?.building_registry,
+    showLandUsePlanTab,
+    showLandRegisterTab,
+    showJointOwnershipTab,
+    showCadastralTab,
+  ]);
+
+  useEffect(() => {
+    if (!result) return;
+    const tabsForLog =
+      pdfTabOrder.length > 0
+        ? pdfTabOrder.map(pdfTabLabel)
+        : [
+            ...parcels.map((p, i) => registryParcelTabTitle(p, i, parcels)),
+            ...(result.building_registry ? ["건축물대장"] : []),
+            ...(showLandUsePlanTab ? ["토지이용계획"] : []),
+            ...(showLandRegisterTab ? ["토지대장"] : []),
+            ...(showJointOwnershipTab ? ["공유지연명부"] : []),
+            ...(showCadastralTab ? ["지적도"] : []),
+          ];
+    console.log("[탭 렌더링] sectionRanges:", pdfSectionRanges);
+    console.log("[탭 렌더링] pdfSectionKeys:", pdfSectionKeys);
+    console.log("[탭 렌더링] 생성될 탭 목록:", tabsForLog);
+  }, [
+    result,
+    pdfSectionRanges,
+    pdfSectionKeys,
+    pdfTabOrder,
+    parcels,
+    showLandUsePlanTab,
+    showLandRegisterTab,
+    showJointOwnershipTab,
+    showCadastralTab,
+  ]);
+
+  useEffect(() => {
+    if (!result) return;
+    if (mainTab > lastTabIndex) setMainTab(lastTabIndex);
+  }, [result, mainTab, lastTabIndex]);
+
   const fileCount = files.length;
   const checklistKey = files[0]?.name ?? "saved-analysis";
 
@@ -625,13 +861,18 @@ export default function RealtyAnalyzer() {
       </header>
 
       <div className="grid min-h-0 flex-1 grid-cols-1 lg:grid-cols-2">
-        <section className="min-h-0 min-w-0 overflow-y-auto border-b border-zinc-200 bg-white p-6 lg:border-b-0 lg:border-r">
-          {loading ? (
-            <div className="flex flex-col items-center justify-center gap-4 py-24">
+        <section className="relative min-h-0 min-w-0 overflow-y-auto border-b border-zinc-200 bg-white p-6 lg:border-b-0 lg:border-r">
+          {loading && (
+            <div
+              className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-4 bg-white/70 backdrop-blur-[1px]"
+              aria-busy="true"
+              aria-label="분석 중"
+            >
               <div className="h-10 w-10 animate-spin rounded-full border-2 border-zinc-200 border-t-zinc-800" />
               <p className="text-sm font-medium text-zinc-600">분석 중입니다...</p>
             </div>
-          ) : !result ? (
+          )}
+          {!result ? (
             <div className="space-y-6">
               <div>
                 <h2 className="text-sm font-semibold text-zinc-800">분석 실행</h2>
@@ -732,54 +973,219 @@ export default function RealtyAnalyzer() {
                 >
                   전체 요약
                 </button>
-                {parcels.map((p, i) => {
-                  const idx = 1 + i;
-                  return (
-                    <button
-                      key={`${p.type}-${i}-${p.address}`}
-                      type="button"
-                      onClick={() => setMainTab(idx)}
-                      className={`max-w-[10rem] truncate rounded-md px-3 py-2 text-sm font-medium ${
-                        mainTab === idx
-                          ? "bg-zinc-900 text-white"
-                          : "bg-zinc-100 text-zinc-700 ring-1 ring-zinc-200 hover:bg-zinc-200"
-                      }`}
-                      title={registryParcelTabTitle(p, i)}
-                    >
-                      {registryParcelTabTitle(p, i)}
-                    </button>
-                  );
-                })}
-                {result.building_registry && buildingTabIndex >= 0 && (
-                  <button
-                    type="button"
-                    onClick={() => setMainTab(buildingTabIndex)}
-                    className={`rounded-md px-3 py-2 text-sm font-medium ${
-                      mainTab === buildingTabIndex
-                        ? "bg-zinc-900 text-white"
-                        : "bg-zinc-100 text-zinc-700 ring-1 ring-zinc-200 hover:bg-zinc-200"
-                    }`}
-                  >
-                    건축물대장
-                  </button>
-                )}
+                {pdfTabOrder.length > 0
+                  ? pdfTabOrder.map((sectionKey, i) => {
+                      const idx = 1 + i;
+                      return (
+                        <button
+                          key={`pdf-tab-${sectionKey}-${i}`}
+                          type="button"
+                          onClick={() => setMainTab(idx)}
+                          className={`max-w-[12rem] truncate rounded-md px-3 py-2 text-sm font-medium ${
+                            mainTab === idx
+                              ? "bg-zinc-900 text-white"
+                              : "bg-zinc-100 text-zinc-700 ring-1 ring-zinc-200 hover:bg-zinc-200"
+                          }`}
+                          title={pdfTabLabel(sectionKey)}
+                        >
+                          {pdfTabLabel(sectionKey)}
+                        </button>
+                      );
+                    })
+                  : legacySecondaryTabs.map((t) => (
+                      <button
+                        key={
+                          t.kind === "parcel"
+                            ? `${t.parcelIndex}-${t.label}`
+                            : `${t.kind}-${t.idx}`
+                        }
+                        type="button"
+                        onClick={() => setMainTab(t.idx)}
+                        className={`${
+                          t.kind === "parcel" ? "max-w-[10rem] truncate " : ""
+                        }rounded-md px-3 py-2 text-sm font-medium ${
+                          mainTab === t.idx
+                            ? "bg-zinc-900 text-white"
+                            : "bg-zinc-100 text-zinc-700 ring-1 ring-zinc-200 hover:bg-zinc-200"
+                        }`}
+                        title={t.label}
+                      >
+                        {t.label}
+                      </button>
+                    ))}
               </div>
 
               {mainTab === 0 && <SummaryOverview result={result} />}
-              {mainTab > 0 && mainTab < 1 + parcels.length && parcels[mainTab - 1] && (
-                <RegistryParcelPanel
-                  parcel={parcels[mainTab - 1]}
-                  parcelIndex={mainTab - 1}
-                  fileCount={fileCount}
-                  onGoToSource={goToSourceText}
-                />
-              )}
-              {result.building_registry && mainTab === buildingTabIndex && (
-                <BuildingRegistryPanel
-                  br={result.building_registry}
-                  fileCount={fileCount}
-                  onScrollToRegistryPdfSection={scrollToBuildingRegistryPdfSection}
-                />
+              {pdfTabOrder.length > 0 ? (
+                <>
+                  {mainTab > 0 &&
+                    mainTab <= pdfTabOrder.length &&
+                    (() => {
+                      const sk = pdfTabOrder[mainTab - 1]!;
+                      if (sk.startsWith("토지 ") || sk.startsWith("건물 ")) {
+                        const pi = parcelIndexForSectionKey(sk, parcels);
+                        return pi >= 0 ? (
+                          <RegistryParcelPanel
+                            parcel={parcels[pi]!}
+                            parcelIndex={pi}
+                            parcels={parcels}
+                            fileCount={fileCount}
+                            onGoToSource={goToSourceText}
+                          />
+                        ) : (
+                          <p className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+                            분석 결과에 「{sk}」에 해당하는 필지가 없습니다. 오른쪽 PDF에서 해당 구간을
+                            확인할 수 있습니다.
+                          </p>
+                        );
+                      }
+                      if (sk === "건축물대장") {
+                        return result.building_registry ? (
+                          <BuildingRegistryPanelMemo
+                            br={result.building_registry}
+                            fileCount={fileCount}
+                            onScrollToRegistryPdfSection={scrollToBuildingRegistryPdfSection}
+                          />
+                        ) : (
+                          <p className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+                            PDF에 건축물대장 구간은 감지되었으나, 아직 추출된 데이터가 없습니다. 분석을 다시
+                            실행해 보세요.
+                          </p>
+                        );
+                      }
+                      if (sk === LAND_USE_PLAN_SECTION_KEY) {
+                        return result.land_use_plan ? (
+                          <LandUsePlanPanel
+                            plan={result.land_use_plan}
+                            fileCount={fileCount}
+                            onGoToSource={goToSourceText}
+                          />
+                        ) : (
+                          <p className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+                            PDF에 토지이용계획확인서 구간은 있으나, 아직 추출된 데이터가 없습니다. 분석을 다시
+                            실행해 보세요.
+                          </p>
+                        );
+                      }
+                      if (sk === LAND_REGISTER_SECTION_KEY) {
+                        return result.land_register ? (
+                          <LandRegisterPanel
+                            block={result.land_register}
+                            fileCount={fileCount}
+                            onGoToSource={goToSourceText}
+                          />
+                        ) : (
+                          <p className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+                            PDF에 토지대장 구간은 있으나, 아직 추출된 데이터가 없습니다. 분석을 다시 실행해
+                            보세요.
+                          </p>
+                        );
+                      }
+                      if (sk === JOINT_OWNERSHIP_SECTION_KEY) {
+                        return result.joint_ownership ? (
+                          <JointOwnershipPanel
+                            block={result.joint_ownership}
+                            fileCount={fileCount}
+                            onGoToSource={goToSourceText}
+                          />
+                        ) : (
+                          <p className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+                            PDF에 공유지연명부 구간은 있으나, 아직 추출된 데이터가 없습니다. 분석을 다시 실행해
+                            보세요.
+                          </p>
+                        );
+                      }
+                      if (sk === CADASTRAL_MAP_SECTION_KEY) {
+                        return (
+                          <CadastralMapPanel
+                            imageDataUrl={cadastralMapImageUrl}
+                            data={result.cadastral_map ?? null}
+                          />
+                        );
+                      }
+                      return null;
+                    })()}
+                </>
+              ) : (
+                <>
+                  {(() => {
+                    const t = legacySecondaryTabs.find((x) => x.idx === mainTab);
+                    if (!t) return null;
+                    if (t.kind === "parcel") {
+                      const parcel = parcels[t.parcelIndex];
+                      if (!parcel) return null;
+                      return (
+                        <RegistryParcelPanel
+                          parcel={parcel}
+                          parcelIndex={t.parcelIndex}
+                          parcels={parcels}
+                          fileCount={fileCount}
+                          onGoToSource={goToSourceText}
+                        />
+                      );
+                    }
+                    if (t.kind === "building" && result.building_registry) {
+                      return (
+                        <BuildingRegistryPanelMemo
+                          br={result.building_registry}
+                          fileCount={fileCount}
+                          onScrollToRegistryPdfSection={scrollToBuildingRegistryPdfSection}
+                        />
+                      );
+                    }
+                    if (t.kind === "land_use") {
+                      return result.land_use_plan ? (
+                        <LandUsePlanPanel
+                          plan={result.land_use_plan}
+                          fileCount={fileCount}
+                          onGoToSource={goToSourceText}
+                        />
+                      ) : (
+                        <p className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+                          PDF에 토지이용계획확인서 구간은 있으나, 아직 추출된 데이터가 없습니다. 분석을 다시
+                          실행해 보세요.
+                        </p>
+                      );
+                    }
+                    if (t.kind === "land_register") {
+                      return result.land_register ? (
+                        <LandRegisterPanel
+                          block={result.land_register}
+                          fileCount={fileCount}
+                          onGoToSource={goToSourceText}
+                        />
+                      ) : (
+                        <p className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+                          PDF에 토지대장 구간은 있으나, 아직 추출된 데이터가 없습니다. 분석을 다시 실행해
+                          보세요.
+                        </p>
+                      );
+                    }
+                    if (t.kind === "joint") {
+                      return result.joint_ownership ? (
+                        <JointOwnershipPanel
+                          block={result.joint_ownership}
+                          fileCount={fileCount}
+                          onGoToSource={goToSourceText}
+                        />
+                      ) : (
+                        <p className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+                          PDF에 공유지연명부 구간은 있으나, 아직 추출된 데이터가 없습니다. 분석을 다시 실행해
+                          보세요.
+                        </p>
+                      );
+                    }
+                    if (t.kind === "cadastral") {
+                      return (
+                        <CadastralMapPanel
+                          imageDataUrl={cadastralMapImageUrl}
+                          data={result.cadastral_map ?? null}
+                        />
+                      );
+                    }
+                    return null;
+                  })()}
+                </>
               )}
 
               <AppraisalChecklist result={result} fileKey={checklistKey} />
@@ -797,6 +1203,7 @@ export default function RealtyAnalyzer() {
             onDrop={onDrop}
             onFileInputChange={onPasteFiles}
             onTextNotFound={showSourceTextNotFound}
+            onSectionRangesComputed={handlePdfSectionRanges}
           />
         </aside>
       </div>
