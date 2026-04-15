@@ -52,7 +52,8 @@ function isNewSectionStart(pageText: string, normalized: string): boolean {
   const has토지이용계획확인서 =
     normalized.includes("토지이용계획확인서") ||
     normalized.includes("토지이용계획확") ||
-    (normalized.includes("신청토지") && normalized.includes("소재지") && normalized.includes("지목"));
+    (normalized.includes("신청토지") && normalized.includes("소재지") && normalized.includes("지목")) ||
+    (normalized.includes("토지이용") && normalized.includes("지구등"));
   const has건축물대장키워드 = normalized.includes("건축물대장");
   const 결과 = has등기사항 || has1ofN || has토지이용계획확인서 || has건축물대장키워드;
 
@@ -86,13 +87,16 @@ function detectSectionKey(pageText: string): DetectKind {
     n.includes("토지이용계획확") ||
     n.includes("국토의계획및이용에관한법률") ||
     (n.includes("토지이용계획") && n.includes("지역·지구등")) ||
+    (n.includes("토지이용계획") && n.includes("용도지역")) ||
+    (n.includes("토지이용") && (n.includes("지구등") || n.includes("용도지역"))) ||
     (n.includes("신청토지") &&
       n.includes("소재지") &&
       n.includes("지번") &&
       n.includes("지목") &&
       n.includes("면적")) ||
     n.includes("지구등지정여부") ||
-    n.includes("지역·지구등지정여부");
+    n.includes("지역·지구등지정여부") ||
+    n.includes("지역지구등지정여부");
 
   const checks = {
     주요등기사항요약: n.includes("주요등기사항요약"),

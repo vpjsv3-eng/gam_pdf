@@ -5,6 +5,25 @@ import { ANALYSIS_SYSTEM_PROMPT } from "@/lib/systemPrompt";
 import { ensureOpenAiEnv } from "@/lib/loadLocalEnv";
 import { decodeAnalyzePdfText, type AnalyzePostBody } from "@/lib/analyzePayloadCodec";
 
+/** GPT가 빈 객체·전부 null만 주면 vision으로 채워야 함(빈 {}는 truthy라 !block만으로는 부족) */
+function needsVisionBackfill(block: unknown): boolean {
+  if (block == null) return true;
+  if (typeof block !== "object" || Array.isArray(block)) return false;
+  const o = block as Record<string, unknown>;
+  const keys = Object.keys(o);
+  if (keys.length === 0) return true;
+  return keys.every((k) => {
+    const v = o[k];
+    if (v == null) return true;
+    if (typeof v === "string" && v.trim() === "") return true;
+    if (Array.isArray(v) && v.length === 0) return true;
+    if (typeof v === "object" && !Array.isArray(v) && Object.keys(v as object).length === 0) {
+      return true;
+    }
+    return false;
+  });
+}
+
 export const runtime = "nodejs";
 export const maxDuration = 120;
 
@@ -173,7 +192,7 @@ export async function POST(request: Request) {
       !Array.isArray(responseBody)
     ) {
       const existingBr = (responseBody as Record<string, unknown>).building_registry;
-      if (!existingBr) {
+      if (needsVisionBackfill(existingBr)) {
         try {
           const brVision = await openai.chat.completions.create({
             model: "gpt-4o",
@@ -232,7 +251,7 @@ export async function POST(request: Request) {
       !Array.isArray(responseBody)
     ) {
       const existingLup = (responseBody as Record<string, unknown>).land_use_plan;
-      if (!existingLup) {
+      if (needsVisionBackfill(existingLup)) {
         try {
           const lupVision = await openai.chat.completions.create({
             model: "gpt-4o",

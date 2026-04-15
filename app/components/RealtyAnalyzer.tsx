@@ -123,10 +123,11 @@ function DetailRow({
   anchor?: string;
 }) {
   const v = value.trim();
+  const isFloorLabel = label === "층수" || label.includes("층수");
   const highlightQuery =
     label === "지분현황"
       ? getJibunSearchText(v)
-      : label === "층수"
+      : isFloorLabel
         ? v.match(/\d+층/)?.[0] ??
           (() => {
             const digits = v.replace(/[^0-9]/g, "");
@@ -718,6 +719,23 @@ export default function RealtyAnalyzer() {
     console.log("[PDF 텍스트 마지막 3000자]", merged.slice(-3000));
 
     setCadastralMapImageUrl(null);
+
+    // 섹션 PNG·getDetectedSectionKeys는 PDF 텍스트 레이어+vision 힌트 처리가 끝난 뒤에만 유효함.
+    // 너무 빨리 분석하면 fullyRendered 전이라 export가 전부 null → vision/API가 안 돌아감.
+    if (pdfRef.current) {
+      const deadline = Date.now() + 120_000;
+      while (Date.now() < deadline) {
+        if (pdfRef.current.isSectionExportReady()) break;
+        await new Promise((r) => setTimeout(r, 200));
+      }
+      if (!pdfRef.current.isSectionExportReady()) {
+        setError(
+          "PDF 뷰어에서 섹션 분석이 아직 끝나지 않았습니다. 잠시 후 다시 「분석 시작」을 눌러 주세요.",
+        );
+        return;
+      }
+    }
+
     const keys = pdfRef.current?.getDetectedSectionKeys() ?? [];
     let cadastralB64: string | undefined;
     let cadPreview: string | null = null;

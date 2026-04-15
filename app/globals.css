@@ -17,3 +17,11 @@ body {
   color: var(--foreground);
   font-family: var(--font-geist-sans), system-ui, sans-serif;
 }
+
+/*
+ * pdf.js 기본 .textLayer { overflow: clip } 때문에 한글 상단 획·자음이 잘리는 경우가 많음.
+ * 인라인 뷰어에서만 clip 해제.
+ */
+.pdf-inline-view-root .textLayer {
+  overflow: visible !important;
+}

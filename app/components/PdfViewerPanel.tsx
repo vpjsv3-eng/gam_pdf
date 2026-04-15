@@ -90,6 +90,11 @@ export type PdfViewerHandle = {
   getDetectedSectionKeys: () => string[];
   /** 지정 섹션(예: 지적도) 페이지를 합쳐 PNG data URL로보냄. 미렌더·구간 없음이면 null */
   exportSectionPngDataUrl: (sectionKey: string) => Promise<string | null>;
+  /**
+   * 섹션 범위·vision 힌트 계산이 끝나 exportSectionPngDataUrl을 쓸 수 있는지.
+   * (렌더 직후 false → 분석 버튼이 너무 빨리 눌리면 PNG 추출이 전부 null이 됨)
+   */
+  isSectionExportReady: () => boolean;
 };
 
 type PageLayerData = {
@@ -97,8 +102,8 @@ type PageLayerData = {
   divs: HTMLElement[];
 };
 
-/** hit: 하이라이트 성공 · miss: 검색 실패(토스트) */
-export type PdfHighlightSearchResult = "hit" | "miss";
+/** hit: 하이라이트 성공 · partial: 문구는 못 찾았으나 해당 섹션 첫 페이지로 스크롤 · miss: 섹션 없음 등 */
+export type PdfHighlightSearchResult = "hit" | "partial" | "miss";
 
 type Props = {
   files: UploadedFile[];
@@ -168,6 +173,24 @@ const PdfViewerPanelInner = forwardRef<PdfViewerHandle, Props>(function PdfViewe
       }
     }
     textLayersRef.current = [];
+  }, []);
+
+  const scrollPdfPageIntoView = useCallback((pageNum: number) => {
+    const run = () => {
+      const host = pagesHostRef.current;
+      const scrollEl = scrollRef.current;
+      const wrap = host?.querySelector<HTMLElement>(`[data-page-num="${pageNum}"]`);
+      if (wrap && scrollEl) {
+        const w = wrap.getBoundingClientRect();
+        const s = scrollEl.getBoundingClientRect();
+        const nextTop = scrollEl.scrollTop + (w.top - s.top) - 16;
+        scrollEl.scrollTo({ top: Math.max(0, nextTop), behavior: "instant" });
+        pdfHighlightDevLog("scrollPdfPageIntoView", { pageNum, scrollTop: scrollEl.scrollTop });
+      } else {
+        wrap?.scrollIntoView({ behavior: "instant", block: "start" });
+      }
+    };
+    requestAnimationFrame(() => requestAnimationFrame(run));
   }, []);
 
   const tryApplyHighlight = useCallback(
@@ -263,37 +286,26 @@ const PdfViewerPanelInner = forwardRef<PdfViewerHandle, Props>(function PdfViewe
         }
       }
 
-      pdfHighlightDevLog("executeSearch miss", { sectionKey, query: q });
-      return "miss";
+      pdfHighlightDevLog("executeSearch partial: scroll to section start", {
+        sectionKey,
+        query: q,
+        startPage: sec.startPage,
+      });
+      scrollPdfPageIntoView(sec.startPage);
+      return "partial";
     },
-    [clearHighlights, tryApplyHighlight],
+    [clearHighlights, tryApplyHighlight, scrollPdfPageIntoView],
   );
 
   const scrollToBuildingRegistrySectionImpl = useCallback(() => {
     clearHighlights();
     const n = pdfDoc?.numPages ?? 0;
-    const startPage = getBuildingRegistryStartPage(pageDataRef.current, n) ?? 1;
-    const run = () => {
-      const host = pagesHostRef.current;
-      const scrollEl = scrollRef.current;
-      const wrap = host?.querySelector<HTMLElement>(`[data-page-num="${startPage}"]`);
-      if (wrap && scrollEl) {
-        const w = wrap.getBoundingClientRect();
-        const s = scrollEl.getBoundingClientRect();
-        const nextTop = scrollEl.scrollTop + (w.top - s.top) - 12;
-        scrollEl.scrollTo({ top: Math.max(0, nextTop), behavior: "instant" });
-        pdfHighlightDevLog("registry scroll", { startPage, scrollTop: scrollEl.scrollTop });
-      } else {
-        wrap?.scrollIntoView({ behavior: "instant", block: "start" });
-        pdfHighlightDevLog("registry scroll fallback", {
-          startPage,
-          hasWrap: Boolean(wrap),
-          hasScrollEl: Boolean(scrollEl),
-        });
-      }
-    };
-    requestAnimationFrame(() => requestAnimationFrame(run));
-  }, [pdfDoc, clearHighlights]);
+    const fromRange = sectionRangesRef.current.find((r) => r.sectionKey === "건축물대장")?.startPage;
+    const startPage =
+      fromRange ?? getBuildingRegistryStartPage(pageDataRef.current, n) ?? 1;
+    pdfHighlightDevLog("registry scroll target", { startPage, fromRange: fromRange != null });
+    scrollPdfPageIntoView(startPage);
+  }, [pdfDoc, clearHighlights, scrollPdfPageIntoView]);
 
   const exportSectionPngDataUrl = useCallback(
     async (sectionKey: string): Promise<string | null> => {
@@ -472,9 +484,10 @@ const PdfViewerPanelInner = forwardRef<PdfViewerHandle, Props>(function PdfViewe
           pageWrap.style.marginBottom = pageNum < doc.numPages ? "8px" : "0";
           pageWrap.style.display = "flex";
           pageWrap.style.justifyContent = "center";
+          pageWrap.style.overflow = "visible";
 
           const pageBox = document.createElement("div");
-          pageBox.className = "relative shadow-md";
+          pageBox.className = "relative overflow-visible shadow-md";
           pageBox.style.width = `${Math.ceil(displayViewport.width)}px`;
           pageBox.style.height = `${Math.ceil(displayViewport.height)}px`;
           pageBox.style.setProperty("--total-scale-factor", String(cssScale));
@@ -515,6 +528,8 @@ const PdfViewerPanelInner = forwardRef<PdfViewerHandle, Props>(function PdfViewe
           await textLayer.render();
 
           if (cancelled || gen !== renderGenRef.current) return;
+
+          textLayerDiv.style.overflow = "visible";
 
           pageBox.appendChild(canvas);
           pageBox.appendChild(textLayerDiv);
@@ -671,6 +686,7 @@ const PdfViewerPanelInner = forwardRef<PdfViewerHandle, Props>(function PdfViewe
       },
       getDetectedSectionKeys: () => sectionRangesRef.current.map((r) => r.sectionKey),
       exportSectionPngDataUrl,
+      isSectionExportReady: () => Boolean(pdfDoc) && fullyRenderedRef.current,
     }),
     [
       files.length,
@@ -764,9 +780,9 @@ const PdfViewerPanelInner = forwardRef<PdfViewerHandle, Props>(function PdfViewe
         </div>
         <div
           ref={scrollRef}
-          className="h-full max-h-[calc(100dvh-14rem)] min-h-[320px] overflow-y-auto overflow-x-auto p-2 lg:max-h-[calc(100dvh-12rem)]"
+          className="pdf-inline-view-root h-full max-h-[calc(100dvh-14rem)] min-h-[320px] overflow-y-auto overflow-x-auto p-2 lg:max-h-[calc(100dvh-12rem)]"
         >
-          <div ref={pagesHostRef} className="flex flex-col items-center pb-2 pt-10" />
+          <div ref={pagesHostRef} className="flex flex-col items-center pb-3 pt-12" />
         </div>
       </div>
     </div>
