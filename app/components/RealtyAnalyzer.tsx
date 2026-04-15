@@ -699,6 +699,11 @@ export default function RealtyAnalyzer() {
     }
     const merged = `\n\n--- 파일: ${f.name} ---\n\n${text}`.trim();
 
+    console.log("[PDF 전체 텍스트 길이]", merged.length);
+    console.log("[건축물대장 포함여부]", merged.includes("건축물대장"));
+    console.log("[토지이용계획 포함여부]", merged.includes("토지이용계획확인서"));
+    console.log("[PDF 텍스트 마지막 3000자]", merged.slice(-3000));
+
     setCadastralMapImageUrl(null);
     const keys = pdfRef.current?.getDetectedSectionKeys() ?? [];
     let cadastralB64: string | undefined;
